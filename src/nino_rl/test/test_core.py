@@ -528,3 +528,138 @@ def test_reward_encourages_direction_recovery_and_penalizes_failed_attempt():
     assert corrected_reward > worsened_reward
     assert failed_terms["wrong_direction_failure"] == -100.0
     assert failed_reward < worsened_reward
+
+
+def test_impact_penalty_is_quartic_but_bounded():
+    full_config = load_config(Path(__file__).parents[1] / "config" / "ppo.yaml")
+    reward_config = {
+        **full_config["reward"],
+        "target_finish_seconds": full_config["target_finish_seconds"],
+        "goal_max_speed_m_s": full_config["goal_max_speed_m_s"],
+        "goal_max_yaw_rate_rad_s": full_config["goal_max_yaw_rate_rad_s"],
+    }
+    tracking = TrackingState(1.0, 0.0, 0.0, 9.0, 9.0)
+    common = dict(
+        previous=tracking,
+        current=tracking,
+        previous_state=RobotState(accel_z=9.80665),
+        action=[0.0, 0.0],
+        previous_action=[0.0, 0.0],
+        action_before_previous=[0.0, 0.0],
+        dt=0.1,
+        elapsed=1.0,
+        reward_config=reward_config,
+        curriculum_level=1.0,
+        timed_out=False,
+        succeeded=False,
+    )
+    _, stable = compute_reward(
+        state=RobotState(accel_z=9.80665), **common
+    )
+    _, impact = compute_reward(
+        state=RobotState(accel_z=30.0), **common
+    )
+    _, extreme = compute_reward(
+        state=RobotState(accel_z=3000.0), **common
+    )
+    assert stable["impact"] == 0.0
+    assert impact["impact"] < 0.0
+    assert extreme["impact"] == impact["impact"]
+    assert np.isfinite(extreme["impact"])
+
+
+def test_attitude_threshold_and_action_rate_penalties():
+    full_config = load_config(Path(__file__).parents[1] / "config" / "ppo.yaml")
+    reward_config = {
+        **full_config["reward"],
+        "target_finish_seconds": full_config["target_finish_seconds"],
+        "goal_max_speed_m_s": full_config["goal_max_speed_m_s"],
+        "goal_max_yaw_rate_rad_s": full_config["goal_max_yaw_rate_rad_s"],
+    }
+    tracking = TrackingState(1.0, 0.0, 0.0, 9.0, 9.0)
+    common = dict(
+        previous=tracking,
+        current=tracking,
+        previous_state=RobotState(accel_z=9.80665),
+        action_before_previous=[0.0, 0.0],
+        dt=0.1,
+        elapsed=1.0,
+        reward_config=reward_config,
+        curriculum_level=1.0,
+        timed_out=False,
+        succeeded=False,
+    )
+    _, safe = compute_reward(
+        state=RobotState(roll=0.19, pitch=0.29, accel_z=9.80665),
+        action=[0.0, 0.0],
+        previous_action=[0.0, 0.0],
+        **common,
+    )
+    _, unsafe = compute_reward(
+        state=RobotState(roll=0.30, pitch=0.40, accel_z=9.80665),
+        action=[1.0, -1.0],
+        previous_action=[0.0, 0.0],
+        **common,
+    )
+    assert safe["attitude"] == 0.0
+    assert unsafe["attitude"] < 0.0
+    assert safe["action_rate"] == 0.0
+    assert unsafe["action_rate"] < 0.0
+
+
+def test_terminal_failures_receive_one_explicit_penalty():
+    full_config = load_config(Path(__file__).parents[1] / "config" / "ppo.yaml")
+    reward_config = {
+        **full_config["reward"],
+        "target_finish_seconds": full_config["target_finish_seconds"],
+        "goal_max_speed_m_s": full_config["goal_max_speed_m_s"],
+        "goal_max_yaw_rate_rad_s": full_config["goal_max_yaw_rate_rad_s"],
+    }
+    tracking = TrackingState(1.0, 0.0, 0.0, 9.0, 9.0)
+    _, terms = compute_reward(
+        tracking,
+        tracking,
+        RobotState(accel_z=9.80665),
+        RobotState(accel_z=9.80665),
+        [0.0, 0.0],
+        [0.0, 0.0],
+        [0.0, 0.0],
+        0.1,
+        1.0,
+        reward_config,
+        1.0,
+        timed_out=False,
+        succeeded=False,
+        rolled_over=True,
+        collision=True,
+        off_path=True,
+        navigation_invalid=True,
+    )
+    assert terms["rollover_failure"] == -100.0
+    assert terms["collision_failure"] == 0.0
+    assert terms["off_path_failure"] == 0.0
+    assert terms["navigation_failure"] == 0.0
+
+    expected = {
+        "collision": ("collision_failure", -100.0),
+        "off_path": ("off_path_failure", -75.0),
+        "navigation_invalid": ("navigation_failure", -25.0),
+    }
+    for flag, (term_name, value) in expected.items():
+        _, individual = compute_reward(
+            tracking,
+            tracking,
+            RobotState(accel_z=9.80665),
+            RobotState(accel_z=9.80665),
+            [0.0, 0.0],
+            [0.0, 0.0],
+            [0.0, 0.0],
+            0.1,
+            1.0,
+            reward_config,
+            1.0,
+            timed_out=False,
+            succeeded=False,
+            **{flag: True},
+        )
+        assert individual[term_name] == value

@@ -12,6 +12,7 @@ from ament_index_python.packages import get_package_share_directory
 import numpy as np
 
 from nino_rl.core import load_config
+from nino_rl.control_v2 import BASELINE_ACTION
 
 
 def main() -> None:
@@ -19,7 +20,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate the normal Nav2 baseline")
     parser.add_argument("--config", type=Path, default=share / "config" / "ppo.yaml")
     parser.add_argument("--episodes", type=int, default=10)
-    parser.add_argument("--phase", type=int, choices=range(1, 7), default=6)
+    parser.add_argument("--phase", type=int, choices=range(1, 7), default=1)
+    parser.add_argument("--seed", type=int, default=10000)
+    parser.add_argument("--randomized", action="store_true")
     parser.add_argument("--output", type=Path, default=Path("rl_runs/baseline"))
     args = parser.parse_args()
     if args.episodes <= 0:
@@ -29,17 +32,17 @@ def main() -> None:
 
     config = load_config(args.config)
     config["curriculum"]["fixed_phase"] = args.phase
-    config["domain_randomization"]["enabled"] = False
+    config["domain_randomization"]["enabled"] = args.randomized
     env = NinoGazeboEnv(config, total_training_steps=1)
     rows = []
     try:
         for episode in range(args.episodes):
-            _, _ = env.reset(seed=int(config["seed"]) + episode)
+            _, _ = env.reset(seed=args.seed + episode)
             done = False
             info = {}
             while not done:
                 _, _, terminated, truncated, info = env.step(
-                    np.zeros(2, dtype=np.float32)
+                    BASELINE_ACTION.copy()
                 )
                 done = terminated or truncated
             row = dict(info["episode_metrics"])
@@ -58,6 +61,11 @@ def main() -> None:
         writer.writeheader()
         writer.writerows(rows)
     summary = {
+        "seed": args.seed,
+        "max_vertical_acceleration_m_s2": float(np.max([
+            row["peak_vertical_acceleration_m_s2"] for row in rows])),
+        "mean_rms_vertical_acceleration_m_s2": float(np.mean([
+            row["rms_vertical_acceleration_m_s2"] for row in rows])),
         "controller": "nav2_baseline",
         "phase": args.phase,
         "episodes": len(rows),

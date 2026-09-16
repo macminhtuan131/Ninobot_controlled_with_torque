@@ -234,6 +234,8 @@ def is_wrong_direction(
     return (
         abs(tracking.heading_error)
         >= radians(float(config["wrong_direction_heading_deg"]))
+        or state.linear_velocity
+        <= -float(config.get("wrong_direction_reverse_speed_m_s", 0.10))
     )
 
 
@@ -322,8 +324,15 @@ def compute_reward(
     wrong_direction: bool = False,
     waypoint_reached_count: int = 0,
     waypoint_time_margin_fraction: float = 0.0,
+    rolled_over: bool = False,
+    collision: bool = False,
+    off_path: bool = False,
+    navigation_invalid: bool = False,
 ) -> tuple[float, dict[str, float]]:
-    """Combine both papers' rewards, adapted to differential wheel torque."""
+    """Legacy v1 reward retained for comparison tests, NOT used by v2 training.
+
+    Active reward and policy contract live in nino_rl/control_v2.py.
+    """
     # Nav2 may replan from the current pose, resetting path_s.  Reduction in
     # remaining arc length is stable across such replans and equals delta_s on
     # a fixed path.
@@ -385,12 +394,63 @@ def compute_reward(
         * max(0.0, delta_s)
         * stability_score
     )
-    imu_vibration = -float(reward_config["imu_vibration_weight"]) * (
-        angular_energy + acceleration_energy
-    ) * dt
-    attitude = -float(reward_config.get("attitude_weight", 0.0)) * (
-        state.roll**2 + state.pitch**2
+    vibration_energy = min(
+        angular_energy + acceleration_energy,
+        max(float(reward_config.get("imu_vibration_energy_clip", 25.0)), 0.0),
     )
+    imu_vibration = -float(reward_config["imu_vibration_weight"]) * (
+        vibration_energy
+    ) * dt
+    # A raw (a_z - g)^4 term can overwhelm PPO after one noisy IMU sample.
+    # Use orientation-independent acceleration magnitude, normalize it, and
+    # clip it before the fourth power. This retains strong impact sensitivity
+    # while keeping every per-step reward finite and bounded.
+    gravity = float(reward_config.get("gravity_m_s2", 9.80665))
+    impact_sigma = max(
+        float(reward_config.get("impact_acceleration_sigma_m_s2", 2.0)),
+        1.0e-6,
+    )
+    impact_clip = max(float(reward_config.get("impact_clip_sigma", 3.0)), 0.0)
+    acceleration_magnitude = float(
+        np.linalg.norm([state.accel_x, state.accel_y, state.accel_z])
+    )
+    normalized_impact = min(
+        abs(acceleration_magnitude - gravity) / impact_sigma,
+        impact_clip,
+    )
+    # Phase 1 is flat. Enable the terrain objectives fully when the first
+    # cable appears at curriculum level 0.2.
+    terrain_scale = float(np.clip(curriculum_level / 0.2, 0.0, 1.0))
+    impact = -float(reward_config.get("impact_weight", 0.0)) * (
+        normalized_impact**4
+    ) * dt * terrain_scale
+
+    body_rate_clip = max(
+        float(reward_config.get("body_rate_clip_sigma", 3.0)), 0.0
+    )
+    normalized_roll_rate = min(
+        abs(state.gyro_x) / max(rate_sigma, 1.0e-6), body_rate_clip
+    )
+    normalized_pitch_rate = min(
+        abs(state.gyro_y) / max(rate_sigma, 1.0e-6), body_rate_clip
+    )
+    body_rate = -float(reward_config.get("body_rate_weight", 0.0)) * (
+        normalized_roll_rate**2 + normalized_pitch_rate**2
+    ) * dt * terrain_scale
+
+    # Do not penalize normal small body motion. Penalize squared excess beyond
+    # separate roll and pitch safety thresholds.
+    roll_threshold = max(
+        float(reward_config.get("attitude_roll_threshold_rad", 0.20)), 1.0e-6
+    )
+    pitch_threshold = max(
+        float(reward_config.get("attitude_pitch_threshold_rad", 0.30)), 1.0e-6
+    )
+    roll_excess = max(0.0, abs(state.roll) - roll_threshold) / roll_threshold
+    pitch_excess = max(0.0, abs(state.pitch) - pitch_threshold) / pitch_threshold
+    attitude = -float(reward_config.get("attitude_weight", 0.0)) * (
+        roll_excess**2 + pitch_excess**2
+    ) * dt
     slip_left, slip_right = wheel_slip_ratios(state)
     slip = -float(reward_config.get("slip_weight", 0.0)) * (
         slip_left**2 + slip_right**2
@@ -417,6 +477,12 @@ def compute_reward(
         - 2.0 * np.asarray(previous_action, dtype=np.float64)
         + np.asarray(action_before_previous, dtype=np.float64)
     )
+    first_difference = np.asarray(action, dtype=np.float64) - np.asarray(
+        previous_action, dtype=np.float64
+    )
+    action_rate = -float(reward_config.get("action_rate_weight", 0.0)) * float(
+        np.mean(first_difference**2)
+    )
     smoothness = -float(reward_config["smoothness_weight"]) * float(np.mean(second_difference**2))
     stuck = 0.0
     if elapsed > 1.0 and delta_s < float(reward_config["stuck_progress_m"]):
@@ -431,9 +497,35 @@ def compute_reward(
             + float(reward_config["timeout_constant"])
         )
     success = float(reward_config["success_bonus"]) if succeeded else 0.0
+    # Match the environment's termination precedence so one sample cannot
+    # receive several terminal penalties for the same episode ending.
+    rollover_failure = (
+        -float(reward_config.get("rollover_termination_penalty", 0.0))
+        if rolled_over
+        else 0.0
+    )
     wrong_direction_failure = (
         -float(reward_config.get("wrong_direction_termination_penalty", 0.0))
-        if wrong_direction
+        if wrong_direction and not rolled_over
+        else 0.0
+    )
+    off_path_failure = (
+        -float(reward_config.get("off_path_termination_penalty", 0.0))
+        if off_path and not rolled_over and not wrong_direction
+        else 0.0
+    )
+    navigation_failure = (
+        -float(reward_config.get("navigation_invalid_termination_penalty", 0.0))
+        if navigation_invalid and not rolled_over and not wrong_direction and not off_path
+        else 0.0
+    )
+    collision_failure = (
+        -float(reward_config.get("collision_termination_penalty", 0.0))
+        if collision
+        and not rolled_over
+        and not wrong_direction
+        and not off_path
+        and not navigation_invalid
         else 0.0
     )
     early_finish = 0.0
@@ -466,10 +558,13 @@ def compute_reward(
         "reverse": float(reverse),
         "imu_stability": float(imu_stability),
         "imu_vibration": float(imu_vibration),
+        "impact": float(impact),
+        "body_rate": float(body_rate),
         "attitude": float(attitude),
         "slip": float(slip),
         "effort": float(effort),
         "endpoint_motion": float(endpoint_motion),
+        "action_rate": float(action_rate),
         "smoothness": float(smoothness),
         "stuck": float(stuck),
         "rollover": float(rollover),
@@ -477,6 +572,10 @@ def compute_reward(
         "time": float(time_cost),
         "success": float(success),
         "wrong_direction_failure": float(wrong_direction_failure),
+        "rollover_failure": float(rollover_failure),
+        "collision_failure": float(collision_failure),
+        "off_path_failure": float(off_path_failure),
+        "navigation_failure": float(navigation_failure),
         "early_finish": float(early_finish),
         "waypoint": float(waypoint),
     }

@@ -15,16 +15,18 @@ from rclpy.time import Time
 from tf2_ros import TransformException
 
 from nino_rl.core import (
-    OBSERVATION_SIZE,
     NavReference,
     PathTracker,
     goal_reached,
     is_wrong_direction,
     load_config,
-    make_observation,
     quaternion_to_euler,
 )
 from nino_rl.ros_interface import RosRobotInterface
+from nino_rl.control_v2 import (
+    BASELINE_ACTION, STOP_ACTION, ObservationHistory, make_observation,
+    decode_action, validate_model,
+)
 
 
 def arguments() -> argparse.Namespace:
@@ -49,6 +51,8 @@ class PolicyNode(RosRobotInterface):
             plan_topic=args.plan_topic,
             nav_cmd_topic=str(self.config["navigation"].get("nav_cmd_topic", "/cmd_vel_nav")),
         )
+        self.imu_includes_gravity = bool(self.config["policy_v2"]["imu_includes_gravity"])
+        self.history = ObservationHistory(self.config["policy_v2"]["history_frames"])
         try:
             from stable_baselines3 import PPO
         except ImportError as error:
@@ -70,7 +74,8 @@ class PolicyNode(RosRobotInterface):
                 * float(self.config["control_hz"])
             ),
         )
-        self.previous_action = np.zeros(2, dtype=np.float32)
+        self.previous_action = BASELINE_ACTION.copy()
+        self.frozen_nav_path = None
         self.action_scale = float(self.config["max_wheel_torque_nm"])
         self.lookahead = list(self.config["path"]["lookahead_m"])
         self.collision_distance = float(self.config["lidar_collision_m"])
@@ -78,12 +83,7 @@ class PolicyNode(RosRobotInterface):
         self.rollover_limit = np.deg2rad(float(self.config["rollover_limit_deg"]))
         device = args.device or str(self.config.get("device", "cuda"))
         self.model = PPO.load(args.model, device=device)
-        expected = tuple(self.model.observation_space.shape)
-        if expected != (OBSERVATION_SIZE,):
-            raise ValueError(
-                f"Policy observation shape {expected} không tương thích với "
-                f"({OBSERVATION_SIZE},)"
-            )
+        validate_model(self.model, self.history.size)
         self.timer = self.create_timer(1.0 / float(self.config["control_hz"]), self._control)
         self.get_logger().info(
             f"PPO policy loaded on {self.model.device}; waiting for sensors and {args.plan_topic}"
@@ -124,48 +124,68 @@ class PolicyNode(RosRobotInterface):
                 self.last_tf_warning = now
             return
         previous_goal = self.path.points[-1].copy()
-        self.path.set_points(transformed)
         self.last_nav_signature = signature
         self.path_source = f"Nav2 ({frame}->odom)"
-        goal_changed = np.linalg.norm(self.path.points[-1] - previous_goal) > float(
+        goal_changed = np.linalg.norm(np.asarray(transformed[-1]) - previous_goal) > float(
             self.config["goal_tolerance_m"]
         )
         if self.path_started_at is None or goal_changed:
-            self.path_started_at = monotonic()
+            self.frozen_nav_path = nav_path
+            self.path_started_at = self.get_clock().now().nanoseconds * 1e-9
             self.deadline_reported = False
             self.wrong_direction_reported = False
             self.wrong_direction_steps = 0
+            self.history.values.clear()
+            self.previous_action = BASELINE_ACTION.copy()
+        # Keep waypoint identity fixed, as training does, but refresh TF.
+        if self.frozen_nav_path is not None:
+            frozen_frame, frozen_points = self.frozen_nav_path
+            self.path.set_points(self._path_in_odom(frozen_frame, frozen_points))
         self.get_logger().info(f"Using {len(points)} waypoints from {self.path_source}")
 
     def _control(self) -> None:
         if not self.sensors_ready():
-            self.publish_torque(0.0, 0.0)
+            self._stop_policy()
             return
-        if self.path_started_at is None:
-            self.path_started_at = monotonic()
         self._update_nav_path()
+        if self.path_started_at is None:
+            self._stop_policy()
+            return
+        if self.frozen_nav_path is not None:
+            try:
+                self.path.set_points(self._path_in_odom(*self.frozen_nav_path))
+            except TransformException:
+                self._stop_policy()
+                return
         state = self.snapshot()
         finite_ranges = [value for value in state.lidar_ranges if np.isfinite(value)]
         if finite_ranges and min(finite_ranges) <= self.collision_distance:
-            self.publish_torque(0.0, 0.0)
+            self._stop_policy()
             return
         _, tracking = make_observation(
             state, self.path, self.lookahead, self.previous_action
         )
-        elapsed = monotonic() - self.path_started_at
+        elapsed = self.get_clock().now().nanoseconds * 1e-9 - self.path_started_at
         desired_linear, desired_angular = self.desired_twist()
+        # Match the environment's 5m waypoint reference/budget convention.
+        spacing = self.config["navigation"]["waypoint_spacing_m"]
+        waypoint_s = min(self.path.total_length, (int(tracking.path_s / spacing) + 1) * spacing)
+        budget = (self.config["navigation"]["waypoint_slack_seconds"]
+                  + self.config["navigation"]["waypoint_budget_seconds_per_m"] * waypoint_s)
+        if waypoint_s >= self.path.total_length:
+            budget = self.config["target_finish_seconds"]
         reference = NavReference(
             desired_linear_velocity=desired_linear,
             desired_angular_velocity=desired_angular,
-            local_waypoint_distance=min(self.lookahead[0], tracking.distance_remaining),
+            local_waypoint_distance=max(0.0, waypoint_s - tracking.path_s),
             final_goal_distance=tracking.endpoint_distance,
             waypoint_time_remaining_fraction=float(
                 np.clip(
                     (
-                        float(self.config["target_finish_seconds"])
+                        float(budget)
                         - elapsed
                     )
-                    / float(self.config["target_finish_seconds"]),
+                    / max(float(budget), 1.0),
                     -1.0,
                     1.0,
                 )
@@ -174,14 +194,24 @@ class PolicyNode(RosRobotInterface):
                 float(self.config["navigation"]["stale_seconds"])
             ),
         )
-        observation, tracking = make_observation(
-            state, self.path, self.lookahead, self.previous_action, reference
-        )
+        preview = self.terrain_preview(self.config["policy_v2"]["preview_timeout_seconds"])
+        if (self.config["policy_v2"]["require_terrain_preview"] and not preview[-1]
+                or self.control_publisher.get_subscription_count() == 0):
+            self._stop_policy()
+            return
+        try:
+            frame, tracking = make_observation(
+                state, self.path, self.lookahead, self.previous_action, reference,
+                preview, self.imu_includes_gravity)
+        except ValueError:
+            self._stop_policy()
+            return
+        observation = self.history.append(frame)
         timed_out = elapsed >= float(
             self.config["max_episode_seconds"]
         )
         wrong_direction_sample = (
-            monotonic() - self.path_started_at
+            elapsed
             >= float(self.config["wrong_direction_grace_seconds"])
             and is_wrong_direction(tracking, state, self.config)
         )
@@ -201,8 +231,7 @@ class PolicyNode(RosRobotInterface):
             or max(abs(state.roll), abs(state.pitch)) >= self.rollover_limit
             or not reference.valid
         ):
-            self.publish_torque(0.0, 0.0)
-            self.previous_action.fill(0.0)
+            self._stop_policy()
             if timed_out and not self.deadline_reported:
                 self.get_logger().warning(
                     "Quá thời gian chạy tối đa; giữ mô-men hai bánh ở 0"
@@ -218,12 +247,16 @@ class PolicyNode(RosRobotInterface):
         action = np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0)
         if not np.all(np.isfinite(action)):
             self.get_logger().error("Policy returned non-finite action; commanding zero torque")
-            action = np.zeros(2, dtype=np.float32)
-        self.publish_torque(
-            float(action[0] * self.action_scale),
-            float(action[1] * self.action_scale),
-        )
+            self._stop_policy()
+            return
+        scale, torque = decode_action(action, self.action_scale)
+        self.publish_control(scale, float(torque[0]), float(torque[1]))
         self.previous_action = action
+
+    def _stop_policy(self):
+        self.publish_control(0.0, 0.0, 0.0)
+        self.previous_action = STOP_ACTION.copy()
+        self.history.values.clear()
 
 
 def main() -> None:
@@ -237,7 +270,7 @@ def main() -> None:
         pass
     finally:
         if node is not None:
-            node.publish_torque(0.0, 0.0)
+            node._stop_policy()
             node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

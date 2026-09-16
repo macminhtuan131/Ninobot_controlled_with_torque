@@ -13,6 +13,7 @@ from ament_index_python.packages import get_package_share_directory
 import numpy as np
 
 from nino_rl.core import load_config
+from nino_rl.control_v2 import validate_model
 
 
 def arguments() -> argparse.Namespace:
@@ -21,6 +22,10 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--model", required=True, type=Path)
     parser.add_argument("--config", type=Path, default=share / "config" / "ppo.yaml")
     parser.add_argument("--episodes", type=int, default=10)
+    parser.add_argument("--phase", type=int, choices=range(1, 7), default=1)
+    parser.add_argument("--seed", type=int, default=10000,
+                        help="Held-out seeds, shared with evaluate_baseline")
+    parser.add_argument("--device", choices=("cpu", "cuda", "auto"))
     parser.add_argument("--output", type=Path, default=Path("rl_runs/evaluation"))
     parser.add_argument(
         "--randomized", action="store_true", help="Enable domain randomization during testing"
@@ -40,13 +45,18 @@ def main() -> None:
 
     config = load_config(args.config)
     config["curriculum"]["enabled"] = False
+    config["curriculum"]["fixed_phase"] = args.phase
     config["domain_randomization"]["enabled"] = bool(args.randomized)
     env = NinoGazeboEnv(config, total_training_steps=1)
     rows = []
     try:
-        model = PPO.load(args.model, device=str(config.get("device", "cuda")))
+        model = PPO.load(
+            args.model,
+            device=args.device or str(config.get("device", "cpu")),
+        )
+        validate_model(model, env.history.size)
         for episode in range(args.episodes):
-            observation, _ = env.reset(seed=int(config["seed"]) + episode)
+            observation, _ = env.reset(seed=args.seed + episode)
             done = False
             info = {}
             while not done:
@@ -79,6 +89,12 @@ def main() -> None:
         for name in sorted({row["termination"] for row in rows})
     }
     summary = {
+        "phase": args.phase,
+        "seed": args.seed,
+        "max_vertical_acceleration_m_s2": float(np.max([
+            row["peak_vertical_acceleration_m_s2"] for row in rows])),
+        "mean_rms_vertical_acceleration_m_s2": float(np.mean([
+            row["rms_vertical_acceleration_m_s2"] for row in rows])),
         "episodes": len(rows),
         "termination_counts": termination_counts,
         "success_rate": float(np.mean([row["success"] for row in rows])),

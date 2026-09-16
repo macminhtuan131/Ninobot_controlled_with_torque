@@ -217,6 +217,9 @@ class EffortDrive(Node):
             self._torque_callback,
             10,
         )
+        self.create_subscription(
+            Float64MultiArray, "/nino_rl/control_command", self._control_v2_callback, 10
+        )
 
         wheel_state_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -256,6 +259,9 @@ class EffortDrive(Node):
 
         # RL residual torque command.
         self.override_torque = [0.0, 0.0]
+        self.v2_active = False
+        self.speed_scale = 1.0
+        self.filtered_speed_scale = 1.0
 
         # Final torque currently sent to the wheel effort controller.
         self.applied_effort = [0.0, 0.0]
@@ -296,6 +302,9 @@ class EffortDrive(Node):
         self.requested_angular = 0.0
 
         self.override_torque = [0.0, 0.0]
+        self.v2_active = False
+        self.speed_scale = 1.0
+        self.filtered_speed_scale = 1.0
         self.applied_effort = [0.0, 0.0]
 
         self.target_velocity = [0.0, 0.0]
@@ -339,7 +348,7 @@ class EffortDrive(Node):
         This callback does NOT clear the Nav2 command.
         The torque is added to the Nav2 PI baseline in _control_update().
         """
-        if not self.accept_torque:
+        if not self.accept_torque or self.v2_active:
             return
 
         if len(message.data) != 2:
@@ -371,6 +380,22 @@ class EffortDrive(Node):
 
         # Do NOT reset last_cmd_ns here.
         # RL is residual; Nav2 must keep controlling the baseline motion.
+
+    def _control_v2_callback(self, message):
+        if not self.accept_torque:
+            return
+        if len(message.data) != 3 or not all(isfinite(x) for x in message.data):
+            self.get_logger().error("Invalid v2 command; stopping scaled reference")
+            self.v2_active = True
+            self.speed_scale = 0.0
+            self.override_torque = [0.0, 0.0]
+            self.last_torque_ns = 0
+            return
+        self.v2_active = True
+        self.speed_scale = clamp(float(message.data[0]), 0.0, 1.0)
+        self.override_torque = [clamp(float(v), -self.max_torque, self.max_torque)
+                                for v in message.data[1:]]
+        self.last_torque_ns = self.get_clock().now().nanoseconds
 
     def _joint_state_callback(
         self,
@@ -443,6 +468,25 @@ class EffortDrive(Node):
                 if command_is_fresh
                 else 0.0
             )
+
+            if self.v2_active:
+                # A lost policy heartbeat stops the reference, never resumes
+                # full-speed baseline. Reset service releases v2 ownership.
+                scale = self.speed_scale if residual_torque_active else 0.0
+                # Preserve in-place Nav2 turns except explicit stop/watchdog.
+                if abs(linear) < 1e-6 and abs(angular) > 1e-6 and scale > 0.0:
+                    scale = max(scale, 0.25)
+                if scale == 0.0:
+                    self.filtered_speed_scale = 0.0
+                else:
+                    self.filtered_speed_scale += clamp(
+                        scale - self.filtered_speed_scale, -2.0 * dt, 2.0 * dt)
+                linear *= self.filtered_speed_scale
+                angular *= self.filtered_speed_scale
+                if self.filtered_speed_scale < 1.0:
+                    # Bleed accumulated PI torque while the policy slows down.
+                    self.error_integral = [i * max(0.0, 1.0 - 5.0 * dt)
+                                           for i in self.error_integral]
 
             if (
                 abs(linear) < 1.0e-9

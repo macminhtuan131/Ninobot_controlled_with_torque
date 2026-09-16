@@ -31,14 +31,18 @@ def test_nino_description_has_required_frames_effort_joints_and_no_diff_drive():
         assert control_joint.find("command_interface[@name='effort']") is not None
 
 
-def test_baseline_and_rl_launch_make_actuation_exclusive():
+def test_training_uses_nav2_baseline_plus_rl_residual_torque():
     launch_dir = ROOT / "src" / "nino_rl" / "launch"
     training = (launch_dir / "training_sim.launch.py").read_text()
     baseline = (launch_dir / "baseline_nav.launch.py").read_text()
-    assert '"accept_cmd_vel": "false"' in training
+    assert '"accept_cmd_vel": "true"' in training
     assert '"accept_torque": "true"' in training
     assert '"accept_cmd_vel": "true"' in baseline
     assert '"accept_torque": "false"' in baseline
+    assert 'executable="wait_for_sim"' in training
+    assert 'OnProcessExit(target_action=readiness, on_exit=[navigation])' in training
+    assert 'executable="wait_for_sim"' in baseline
+    assert 'OnProcessExit(target_action=readiness, on_exit=[navigation])' in baseline
 
 
 def test_six_phase_curriculum_and_nav_goal_are_configured():

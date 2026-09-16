@@ -1,10 +1,17 @@
 # Nino Nav2-guided wheel-torque RL
 
+**Current implementation: [algorithm v2](ALGORITHM_V2.md).** Active policy has
+three actions (speed scale, common torque, differential torque) and 300 stacked
+inputs. Use that guide for reward, curriculum and commands. The 54-input,
+two-action descriptions below document v1 and are retained as historical notes;
+old checkpoints cannot be resumed/deployed by v2.
+
 This package trains a differential-drive Nino robot to follow a Nav2 hallway
-plan by commanding only the left and right wheel torque. Nav2 retains map
+plan by learning bounded left/right residual wheel torque. Nav2 retains map
 loading, AMCL localization, global planning, obstacle-aware local control, and
-the desired motion reference. RL observes the controller's `/cmd_vel_nav`;
-the actuator adapter explicitly rejects `/cmd_vel` in RL mode.
+the desired motion reference and baseline wheel-speed control. RL observes the
+controller's `/cmd_vel_nav`; the actuator adapter adds the learned residual to
+the bounded Nav2 baseline torque.
 
 ## Architecture
 
@@ -16,11 +23,11 @@ long_hall map -> map_server -> AMCL ----------------------> map -> odom TF
 /scan + odom/TF ----------------> Nav2 planner/controller
                                      | /plan + /cmd_vel_nav reference
                                      v
-/imu + /joint_states + /odom -> normalized 54-D observation -> PPO
+/imu + /joint_states + /odom -> normalized 54-D observation -> PPO residual
                                                                |
                                                         [-1, 1]^2
                                                                |
-                                                torque scale + saturation
+                                           residual torque scale + saturation
                                                                |
                                                /wheel_torque_commands
                                                                |
@@ -49,8 +56,9 @@ map -> odom -> base_footprint -> base_link
 - `nino_description`: Nino Xacro, Gazebo Harmonic spawn, sensors, effort
   interfaces, and a ground-truth odometry stream used only to calculate
   simulated slip.
-- `nino_control`: safe actuator adapter. `accept_cmd_vel` and `accept_torque`
-  make baseline and RL actuation mutually exclusive.
+- `nino_control`: safe actuator adapter. Training combines bounded Nav2
+  baseline torque with bounded RL residual torque; baseline evaluation disables
+  the residual input.
 - `nino_rl`: Nav2 goal/reset interface, curriculum terrain manager,
   observations, reward, termination, preflight, PPO training and evaluation.
 
@@ -66,8 +74,8 @@ map -> odom -> base_footprint -> base_link
 | `/map`, `/amcl_pose` | static map and localization result |
 | `/plan` | Nav2 global/local tracking path supplied to RL |
 | `/cmd_vel_nav` | Nav2 controller's desired local linear/angular reference for RL |
-| `/cmd_vel` | collision-filtered command used only by the non-RL baseline |
-| `/wheel_torque_commands` | RL action after scaling, `[left_Nm, right_Nm]` |
+| `/cmd_vel` | collision-filtered Nav2 command used to produce baseline torque |
+| `/wheel_torque_commands` | scaled RL residual, `[left_Nm, right_Nm]` |
 | `/wheel_torque_applied` | saturated/rate-limited effort actually applied |
 | `/ground_truth/odom` | simulation-only slip metric; never localization/control |
 | `/navigate_to_pose` | configurable hallway task goal |
@@ -108,9 +116,10 @@ they expose disturbances caused by cables and permit explicit stability and
 slip objectives.
 
 The continuous action is `a in [-1, 1]^2`. It maps to
-`[tau_left, tau_right] = clip(a * max_wheel_torque_nm)`. A second independent
-safety layer in `effort_drive` clamps torque, rate-limits torque changes,
-enforces wheel-speed limits, and applies a 0.25 s watchdog.
+`delta_tau = clip(a * max_wheel_torque_nm)` and is added to the Nav2 baseline
+wheel torque while Nav2 commands motion. A second independent safety layer in
+`effort_drive` clamps total torque, rate-limits changes, enforces wheel-speed
+limits, and applies a 0.25 s watchdog.
 
 ## Reward and termination
 
@@ -118,8 +127,9 @@ The implementation follows:
 
 ```text
 R = R_progress + R_heading/alignment + R_waypoint + R_goal
-    - R_cross_track - R_attitude - R_slip - R_effort - R_time
-    - R_oscillation - R_stuck - R_timeout
+    - R_cross_track - R_impact - R_body_rate - R_attitude
+    - R_slip - R_effort - R_action_rate - R_oscillation
+    - R_stuck - R_timeout - R_terminal_failure
 ```
 
 Progress uses reduction in remaining Nav2 path length, which remains stable
@@ -127,7 +137,10 @@ when Nav2 replans. A waypoint bonus is adjusted by its cumulative time margin;
 the adjustment is deliberately smaller than the goal/progress terms. Goal
 success also receives an early-finish bonus. Quadratic cross-track and heading
 terms discourage drift, while roll/pitch, IMU vibration, wheel slip, effort and
-second-difference action terms promote stable cable traversal.
+first/second-difference action terms promote stable cable traversal. The
+VDV-inspired impact term uses `(|a|-g)^4`, but normalizes and clips the value
+before exponentiation so an IMU spike cannot dominate an entire PPO rollout.
+Separate roll/pitch thresholds avoid penalizing normal small body motion.
 
 An episode ends on final-goal success, flip, collision, sustained wrong
 direction, sustained corridor exit, sustained invalid localization/navigation,
@@ -171,6 +184,7 @@ rosdep install --from-paths src --ignore-src --rosdistro jazzy -r -y
 source /opt/ros/jazzy/setup.bash
 python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
+python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.7"
 python -m pip install -r src/nino_rl/requirements.txt
 python -m colcon build --symlink-install
 source install/setup.bash
@@ -183,13 +197,15 @@ Gymnasium, and Stable-Baselines3.
 Start only one simulation/Nav2 launch at a time. AMCL automatically receives
 the configured starting pose and publishes `map -> odom`; the trainer also
 reinitializes localization after every episode reset. A startup TF wait is
-normal until the map, sensors, and AMCL are active. Persistent missing TF
-causes preflight to fail before training starts.
+normal. The launch file now gates Nav2 until wheel controllers, all sensors,
+`/odom`, and `odom -> base_footprint` are live. Persistent missing interfaces
+therefore remain visible in the `nino_sim_readiness` log instead of racing Nav2
+startup; preflight still performs the complete live-system check.
 
 Start the RL topology:
 
 ```bash
-ros2 launch nino_rl training_sim.launch.py headless:=false rviz:=true
+ros2 launch nino_rl training_sim.launch.py headless:=true rviz:=false
 ```
 
 Before training, run the live gate directly if desired:
@@ -205,13 +221,14 @@ check fails:
 source /opt/ros/jazzy/setup.bash
 source .venv/bin/activate
 source install/setup.bash
-ros2 run nino_rl train --timesteps 500000 --check-env
+ros2 run nino_rl train --timesteps 500000 --device cpu --check-env
 ```
 
 Evaluate an RL model with the RL topology still running:
 
 ```bash
-ros2 run nino_rl evaluate --model rl_runs/<run>/nino_ppo_final.zip --episodes 10
+ros2 run nino_rl evaluate --model rl_runs/<run>/nino_ppo_final.zip \
+  --episodes 10 --device cpu
 ```
 
 ## Baseline versus RL
@@ -224,6 +241,7 @@ ros2 run nino_rl evaluate_baseline --episodes 10 --phase 6
 ```
 
 Baseline mode accepts Nav2 `/cmd_vel` and rejects `/wheel_torque_commands`.
-Training/evaluation mode does the inverse. Compare the generated CSV/JSON in
+Training/evaluation accepts both and learns a bounded residual correction to
+the Nav2 baseline. Compare the generated CSV/JSON in
 `rl_runs/baseline` with `rl_runs/evaluation`; both contain the same path,
 timing, attitude and slip metrics.

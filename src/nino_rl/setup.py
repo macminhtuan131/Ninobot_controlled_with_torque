@@ -14,7 +14,7 @@ setup(
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
         (
             "share/" + package_name,
-            ["package.xml", "requirements.txt", "README.md", "README_VI.md"],
+            ["package.xml", "requirements.txt", "README.md", "README_VI.md", "ALGORITHM_V2.md"],
         ),
         (os.path.join("share", package_name, "config"), glob("config/*.yaml")),
         (os.path.join("share", package_name, "launch"), glob("launch/*.launch.py")),
@@ -34,6 +34,7 @@ setup(
             "policy_node = nino_rl.policy_node:main",
             "preflight = nino_rl.preflight:main",
             "train = nino_rl.train:main",
+            "wait_for_sim = nino_rl.wait_for_sim:main",
         ],
     },
 )

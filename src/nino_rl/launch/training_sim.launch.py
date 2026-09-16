@@ -1,7 +1,12 @@
 """Start Nino, AMCL/Nav2, and the RL-only torque training interfaces."""
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import (
+    DeclareLaunchArgument,
+    IncludeLaunchDescription,
+    RegisterEventHandler,
+)
+from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
@@ -26,8 +31,8 @@ def generate_launch_description():
             "sensor_monitor": "false",
             "start_effort_drive": "true",
             "linorobot2_mode": "false",
-            # RL observes /cmd_vel_nav, but only the policy may actuate torque.
-            # The collision-filtered /cmd_vel cannot drive in training mode.
+            # Nav2 produces bounded baseline torque; RL adds a bounded residual.
+            # Both inputs are required by effort_drive's residual architecture.
             "accept_cmd_vel": "true",
             "accept_torque": "true",
             "verbosity": LaunchConfiguration("verbosity"),
@@ -65,6 +70,15 @@ def generate_launch_description():
             "/world/long_hall/remove@ros_gz_interfaces/srv/DeleteEntity",
         ],
     )
+    readiness = Node(
+        package="nino_rl",
+        executable="wait_for_sim",
+        name="nino_sim_readiness",
+        output="screen",
+    )
+    start_navigation_when_ready = RegisterEventHandler(
+        OnProcessExit(target_action=readiness, on_exit=[navigation])
+    )
     return LaunchDescription(
         [
             DeclareLaunchArgument(
@@ -88,7 +102,8 @@ def generate_launch_description():
             DeclareLaunchArgument("start_y", default_value="0.0"),
             DeclareLaunchArgument("start_yaw", default_value="0.0"),
             simulator,
-            navigation,
             reset_bridge,
+            start_navigation_when_ready,
+            readiness,
         ]
     )

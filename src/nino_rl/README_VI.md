@@ -1,5 +1,11 @@
 # RL điều khiển mô-men hai bánh cho Nino
 
+**Bản đang chạy: [thuật toán v2](ALGORITHM_V2.md).** Policy có 3 action và
+300 đầu vào (5 frame × 60). Reward đang dùng ở `nino_rl/control_v2.py`, cấu hình
+`reward_v2`. Các mô tả 54 đầu vào/2 action phía dưới là ghi chép v1; không dùng
+checkpoint v1 để resume/deploy v2. Hướng dẫn build, train và đánh giá bản mới
+nằm trong tài liệu v2 ở trên.
+
 Package `nino_rl` cung cấp ba chương trình hoàn chỉnh:
 
 - `train`: huấn luyện PPO trong Gazebo trên dãy gờ cáp với curriculum;
@@ -34,7 +40,7 @@ Trong implementation hiện tại, độ bám `[0.3, 1.0]` được mô phỏng 
 
 ### Observation và action của Nino
 
-Observation có 41 giá trị hữu hạn, được chuẩn hóa. Callback `/imu/data` đọc và chuẩn hóa quaternion trước khi tạo observation:
+Observation có 54 giá trị hữu hạn, được chuẩn hóa. Callback `/imu/data` đọc và chuẩn hóa quaternion trước khi tạo observation:
 
 | Thành phần | Số chiều |
 |---|---:|
@@ -45,6 +51,12 @@ Observation có 41 giá trị hữu hạn, được chuẩn hóa. Callback `/imu
 | IMU quaternion `(x,y,z,w)`, angular velocity XYZ, linear acceleration XYZ | 10 |
 | khoảng cách nhỏ nhất trong 5 vùng LiDAR | 5 |
 | action trước đó | 2 |
+| vận tốc dài/góc tham chiếu từ Nav2 | 2 |
+| hướng đơn vị tới waypoint cục bộ | 2 |
+| sai số ngang, khoảng cách waypoint và đích cuối | 3 |
+| roll/pitch tường minh | 2 |
+| hệ số trượt bánh trái/phải | 2 |
+| thời gian waypoint còn lại và cờ Nav2 hợp lệ | 2 |
 
 Roll/pitch vẫn được tính từ quaternion để dùng cho điều kiện rollover và reward, nhưng policy nhận trực tiếp toàn bộ 10 giá trị IMU. Hướng mong muốn là tiếp tuyến của đường tại điểm gần robot nhất; `cos/sin` sai số hướng tránh gián đoạn tại ±π.
 
@@ -52,6 +64,10 @@ Reward IMU bổ sung gồm:
 
 - `imu_stability`: thưởng **tiến độ ổn định**, lớn nhất khi roll/pitch nhỏ, tốc độ quay quanh X/Y nhỏ và gia tốc thay đổi ít;
 - `imu_vibration`: phạt rung dựa trên gyro X/Y và độ thay đổi vector gia tốc giữa hai bước;
+- `impact`: phạt bậc bốn theo `(|a|-g)` đã chuẩn hóa và chặn biên; giữ độ nhạy với cú xóc nhưng không để một spike IMU phá hỏng toàn bộ PPO rollout;
+- `body_rate`: phạt tốc độ roll/pitch đã chuẩn hóa và chặn biên;
+- `attitude`: chỉ phạt phần roll vượt `0,20 rad` hoặc pitch vượt `0,30 rad`;
+- `action_rate` và `smoothness`: phạt cả vi phân bậc một và bậc hai của torque residual;
 - `direction`: thưởng tiến độ theo `max(0, cos(e_heading))`, lớn nhất khi robot tiến đúng hướng mong muốn;
 - `direction_correction`: thưởng khi sai số hướng giảm sau quyết định torque và phạt khi sai số tăng;
 - `wrong_way`/`reverse`: phạt quay ngược hướng đường hoặc chạy lùi;
@@ -59,7 +75,7 @@ Reward IMU bổ sung gồm:
 - `rollover`: phạt mạnh riêng khi roll/pitch vượt ngưỡng 30 độ.
 - `endpoint_motion`: trong 2 m cuối, phạt vận tốc thẳng/yaw-rate vượt ngưỡng để policy học giảm tốc và dừng êm;
 - `success`: thưởng 100 điểm khi xe thật sự ổn định tại endpoint;
-- `early_finish`: thưởng thêm tuyến tính theo thời gian về sớm, tối đa 100 điểm. Với deadline thưởng 50 s, về ở 40 s được thêm 20 điểm; từ 50 s trở đi không còn thưởng sớm.
+- `early_finish`: thưởng thêm tuyến tính theo thời gian về sớm, tối đa 100 điểm. Với deadline thưởng 90 s, về ở 72 s được thêm 20 điểm; từ 90 s trở đi không còn thưởng sớm.
 
 Stable bonus và direction reward đều được nhân với quãng đường tiến lên nên robot không thể nhận thưởng chỉ bằng cách đứng yên. Sai hướng vẫn bị `heading` phạt riêng. Không phạt trực tiếp gyro-Z trong stability reward vì yaw-rate là cần thiết khi bám đường cong.
 
@@ -69,7 +85,7 @@ Một episode chỉ thành công khi đồng thời thỏa tất cả điều ki
 - vận tốc thẳng không quá `0,20 m/s`, yaw-rate không quá `0,30 rad/s`;
 - roll và pitch đều không quá `10°`.
 
-Episode dừng ngay khi thành công, đi sai hướng liên tục, collision, lệch đường hoặc rollover; episode bị truncate khi hết `60 s`. `target_finish_seconds: 50` là mốc tính thưởng về sớm, còn `max_episode_seconds: 60` là deadline cứng. Hai giá trị đều chỉnh được trong `config/ppo.yaml`.
+Episode dừng ngay khi thành công, đi sai hướng liên tục, collision, lệch đường hoặc rollover; episode bị truncate khi hết `120 s`. `target_finish_seconds: 90` là mốc tính thưởng về sớm, còn `max_episode_seconds: 120` là deadline cứng. Hai giá trị đều chỉnh được trong `config/ppo.yaml`.
 
 ### Một episode là một attempt điều chỉnh hướng
 
@@ -77,16 +93,16 @@ Chiều tiến mong muốn không bị gắn cứng vào trục `+X`: nó là th
 
 1. đọc quaternion, angular velocity và linear acceleration từ IMU;
 2. đọc tốc độ encoder bánh trái/phải;
-3. tính sai số hướng so với tiếp tuyến của path và tạo observation 41 chiều;
+3. tính sai số hướng so với tiếp tuyến của path và tạo observation 54 chiều;
 4. PPO chọn hai torque mới, sau đó reward đo xem quyết định đó làm xe thẳng lại hay lệch thêm.
 
 Nếu gờ làm lệch xe trong thời gian ngắn, attempt vẫn tiếp tục để policy học phục hồi. Attempt chỉ bị hủy và reset khi sai số hướng từ `60°` hoặc vận tốc lùi từ `0,10 m/s` tồn tại liên tục ít nhất `0,5 s`. Khoảng `1 s` đầu episode được miễn kiểm tra để Gazebo ổn định. Các ngưỡng tương ứng là `wrong_direction_*` trong `config/ppo.yaml`.
 
 Mỗi lần reset, training node lần lượt reset trạng thái model, gọi Gazebo `set_pose` để đặt model `nino` về chính xác `x=0, y=0, z=0, roll=0, pitch=0, yaw=0`, rồi reset odometry và bộ nhớ controller về zero. Không đặt gờ nào trong vùng spawn phẳng.
 
-Action là `Box([-1,-1], [1,1])`, nhân với giới hạn mặc định `4 N.m`, rồi phát lên `/wheel_torque_commands` theo thứ tự `[trái, phải]`. `effort_drive` vẫn giới hạn cứng tối đa `12 N.m`, slew-rate và timeout 0,25 s.
+Action là `Box([-1,-1], [1,1])`, nhân với giới hạn mặc định `0,5 N.m`, rồi phát torque residual lên `/wheel_torque_commands` theo thứ tự `[trái, phải]`. `effort_drive` cộng residual này với torque nền của Nav2, sau đó vẫn giới hạn cứng tối đa `12 N.m`, slew-rate và timeout 0,25 s.
 
-## 1. Cài đặt Ubuntu 24.04 + ROS 2 Jazzy + RTX 5060
+## 1. Cài đặt Ubuntu 24.04 + ROS 2 Jazzy, không cần NVIDIA
 
 Các dependency ROS:
 
@@ -104,20 +120,21 @@ cd /home/tue/ninorobot
 python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
+python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.7"
 python -m pip install -r src/nino_rl/requirements.txt
 ```
 
-Driver CUDA 13.0 có khả năng chạy wheel PyTorch CUDA tương thích ngược. Không cài PyTorch CPU-only. Kiểm tra thật sự bằng phép nhân tensor trên GPU:
+Kiểm tra PyTorch đang chạy CPU:
 
 ```bash
 source /opt/ros/jazzy/setup.bash
 source .venv/bin/activate
 python -m colcon build --symlink-install
 source install/setup.bash
-ros2 run nino_rl check_cuda
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 ```
 
-Kết quả đúng phải có `CUDA khả dụng: True`, tên `NVIDIA GeForce RTX 5060` và dòng `Phép nhân CUDA kiểm tra: OK`.
+Kết quả đúng phải có `False` ở cuối. Không chạy `check_cuda`, vì lệnh đó cố ý báo lỗi trên máy không có NVIDIA.
 
 Luôn build bằng `python -m colcon` khi `.venv` đang active. Nhờ vậy executable Python trong `install/` dùng đúng interpreter có PyTorch/SB3, đồng thời vẫn import được ROS Jazzy.
 
@@ -135,20 +152,25 @@ source install/setup.bash
 ros2 launch nino_rl training_sim.launch.py headless:=true
 ```
 
+Launch đợi controller bánh xe, bốn luồng sensor, `/odom` và TF
+`odom -> base_footprint` sẵn sàng rồi mới khởi động Nav2. Dòng
+`nino_sim_readiness: Waiting for ...` trong vài giây đầu là bình thường; không
+nhấn `Ctrl-C` trong lúc này.
+
 Muốn **xem xe train trực tiếp**, dùng Gazebo GUI ở Terminal 1 (train sẽ chậm hơn headless):
 
 ```bash
 ros2 launch nino_rl training_sim.launch.py headless:=false rviz:=true
 ```
 
-Terminal 2 — train 500.000 bước bằng CUDA:
+Terminal 2 — train 500.000 bước bằng CPU:
 
 ```bash
 cd /home/tue/ninorobot
 source /opt/ros/jazzy/setup.bash
 source .venv/bin/activate
 source install/setup.bash
-ros2 run nino_rl train --timesteps 500000 --output rl_runs
+ros2 run nino_rl train --timesteps 500000 --output rl_runs --device cpu
 ```
 
 Chạy thử pipeline ngắn trước khi train dài:
@@ -216,7 +238,7 @@ ros2 run nino_rl evaluate \
   --episodes 25 --randomized
 ```
 
-Output trong `rl_runs/evaluation/` gồm từng attempt ở CSV và summary JSON: success rate, tỷ lệ hủy do sai hướng, số lượng từng nguyên nhân kết thúc, tỷ lệ thành công trước 50 s, thời gian thành công, khoảng cách cuối tới endpoint, vận tốc cuối, sai số ngang, roll/pitch, max tilt, angular-rate XY và độ thay đổi gia tốc IMU trung bình. Nên chỉ chuyển sang robot thật khi test deterministic và randomized đều ổn định, không rollover/collision và sai số phù hợp giới hạn cơ khí của bạn.
+Output trong `rl_runs/evaluation/` gồm từng attempt ở CSV và summary JSON: success rate, tỷ lệ hủy do sai hướng, số lượng từng nguyên nhân kết thúc, tỷ lệ thành công trước 90 s, thời gian thành công, khoảng cách cuối tới endpoint, vận tốc cuối, sai số ngang, roll/pitch, max tilt, angular-rate XY và độ thay đổi gia tốc IMU trung bình. Nên chỉ chuyển sang robot thật khi test deterministic và randomized đều ổn định, không rollover/collision và sai số phù hợp giới hạn cơ khí của bạn.
 
 ## 4. Chạy policy trong Gazebo
 
@@ -248,7 +270,7 @@ source /home/tue/ninorobot/.venv/bin/activate
 source /home/tue/ninorobot/install/setup.bash
 ros2 run nino_rl policy_node \
   --model /duong/dan/nino_ppo_final.zip \
-  --plan-topic /plan --device cuda
+  --plan-topic /plan --device cpu
 ```
 
 Không thêm `--use-sim-time` trên robot thật. Có thể remap nếu Nav2 của bạn phát global plan ở tên khác, ví dụ `--plan-topic /plan_smoothed`.
@@ -269,9 +291,9 @@ ros2 topic echo /wheel_torque_applied
 - `Missing /world/long_hall/control`: phải launch bằng `training_sim.launch.py`, không chỉ `sim.launch.py`.
 - thiếu `/world/long_hall/set_pose`: build lại workspace và khởi động lại `training_sim.launch.py` để nạp bridge reset pose mới.
 - thiếu `/reset_wheel_odometry`: build/source lại workspace sau thay đổi `nino_control`.
-- `torch.cuda.is_available() = False`: active đúng `.venv`, chạy `check_cuda`; không cho script âm thầm train CPU.
+- báo lỗi yêu cầu CUDA: build/source lại sau khi cập nhật config hoặc thêm `--device cpu` vào lệnh train/evaluate.
 - thiếu sensor khi reset: kiểm tra simulation chỉ chạy một phiên và bốn topic `/odom`, `/imu/data`, `/joint_states`, `/scan` đang có dữ liệu.
-- model báo shape khác `(41,)`: model đó được train bằng observation version cũ/khác, không được dùng trực tiếp; hãy train lại.
+- model báo shape khác `(54,)`: model đó được train bằng observation version cũ/khác, không được dùng trực tiếp; hãy train lại.
 - robot rung mạnh: giảm `max_wheel_torque_nm`, tăng phạt `smoothness_weight`, rồi train/evaluate lại; không chỉnh model trong lúc đang chạy thật.
 
 ## Nguồn

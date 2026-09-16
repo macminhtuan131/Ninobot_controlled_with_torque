@@ -5,13 +5,14 @@ from __future__ import annotations
 import argparse
 from datetime import datetime
 from pathlib import Path
-import shutil
 import sys
+import yaml
 
 from ament_index_python.packages import get_package_share_directory
 import numpy as np
 
 from nino_rl.core import load_config
+from nino_rl.control_v2 import validate_model
 
 
 def arguments() -> argparse.Namespace:
@@ -23,6 +24,9 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--checkpoint-every", type=int, default=25_000)
     parser.add_argument("--check-env", action="store_true")
+    parser.add_argument("--phase", type=int, choices=range(1, 7),
+                        help="Fixed terrain phase; advance after held-out evaluation")
+    parser.add_argument("--device", choices=("cpu", "cuda", "auto"))
     parser.add_argument("--preflight-timeout", type=float, default=30.0)
     return parser.parse_args(sys.argv[1:])
 
@@ -44,7 +48,9 @@ def main() -> None:
         ) from error
 
     config = load_config(args.config)
-    device = str(config.get("device", "cuda"))
+    if args.phase is not None:
+        config["curriculum"]["fixed_phase"] = args.phase
+    device = args.device or str(config.get("device", "cpu"))
     if device.startswith("cuda") and not th.cuda.is_available():
         raise SystemExit(
             "Cấu hình yêu cầu CUDA nhưng torch.cuda.is_available() = False. "
@@ -71,6 +77,9 @@ def main() -> None:
 
         def _on_rollout_start(self) -> None:
             self.reward_terms.clear()
+            if env.world_paused_for_update:
+                env.ros.set_world_paused(False)
+                env.world_paused_for_update = False
 
         def _on_step(self) -> bool:
             for info in self.locals.get("infos", []):
@@ -78,7 +87,7 @@ def main() -> None:
                     self.reward_terms.setdefault(name, []).append(float(value))
                 metrics = info.get("episode_metrics")
                 if metrics is not None:
-                    self.logger.record(
+                    self.logger.record_mean(
                         "episode/wrong_direction_failure",
                         float(metrics["termination"] == "wrong_direction"),
                     )
@@ -94,11 +103,18 @@ def main() -> None:
                         "rms_wheel_slip",
                         "rms_wheel_torque_nm",
                         "mean_imu_angular_xy_rad_s",
+                        "peak_vertical_acceleration_m_s2",
+                        "rms_vertical_acceleration_m_s2",
                     ):
-                        self.logger.record(f"episode/{name}", float(metrics[name]))
+                        self.logger.record_mean(f"episode/{name}", float(metrics[name]))
             return True
 
         def _on_rollout_end(self) -> None:
+            # Do not leave the policy driving during an arbitrarily long PPO update.
+            env.ros.publish_control(0.0, 0.0, 0.0)
+            # Optimizer wall time must not consume episode simulation time.
+            env.ros.set_world_paused(True)
+            env.world_paused_for_update = True
             for name, values in self.reward_terms.items():
                 if values:
                     self.logger.record(f"reward_terms/{name}", float(np.mean(values)))
@@ -109,7 +125,9 @@ def main() -> None:
     tensorboard_dir = run_dir / "tensorboard"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     tensorboard_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(args.config, run_dir / "ppo.yaml")
+    config["device"] = device
+    with (run_dir / "ppo.yaml").open("w") as stream:
+        yaml.safe_dump(config, stream, sort_keys=False)
 
     env = NinoGazeboEnv(config, total_training_steps=args.timesteps)
     try:
@@ -118,7 +136,10 @@ def main() -> None:
         monitored = Monitor(env, filename=str(run_dir / "monitor.csv"))
         ppo = config["ppo"]
         if args.resume:
-            model = PPO.load(args.resume, env=monitored, device=device)
+            model = PPO.load(args.resume, device=device)
+            validate_model(model, env.history.size)
+            model.set_env(monitored)
+            model.tensorboard_log = str(tensorboard_dir)
             env.global_steps = int(model.num_timesteps)
             env.total_training_steps = int(model.num_timesteps) + args.timesteps
             reset_num_timesteps = False

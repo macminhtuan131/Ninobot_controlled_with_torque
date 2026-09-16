@@ -53,6 +53,7 @@ from std_srvs.srv import Trigger
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from nino_rl.core import RobotState, quaternion_to_euler
+from nino_rl.control_v2 import ImuWindow, vertical_acceleration
 
 
 
@@ -115,6 +116,10 @@ class RosRobotInterface(Node):
         self._lock = Lock()
 
         self._state = RobotState()
+        self.imu_includes_gravity = True
+        self.imu_window = ImuWindow()
+        self._preview = (0.0, 0.0, 0.0)
+        self._preview_received_at = -float("inf")
 
         self._received = set()
 
@@ -136,6 +141,12 @@ class RosRobotInterface(Node):
 
             Float64MultiArray, "/wheel_torque_commands", 10
 
+        )
+        self.control_publisher = self.create_publisher(
+            Float64MultiArray, "/nino_rl/control_command", 10
+        )
+        self.create_subscription(
+            Float64MultiArray, "/nino_rl/terrain_preview", self._preview_callback, 10
         )
 
         self.create_subscription(Odometry, "/odom", self._odom_callback, 10)
@@ -345,6 +356,9 @@ class RosRobotInterface(Node):
             self._state.accel_y = float(message.linear_acceleration.y)
 
             self._state.accel_z = float(message.linear_acceleration.z)
+            stamp = message.header.stamp.sec + message.header.stamp.nanosec * 1e-9
+            self.imu_window.add(stamp, vertical_acceleration(
+                self._state, self.imu_includes_gravity))
 
             self._mark_received("imu")
 
@@ -595,6 +609,52 @@ class RosRobotInterface(Node):
         message.data = [float(left_nm), float(right_nm)]
 
         self.torque_publisher.publish(message)
+
+    def publish_control(self, scale: float, left_nm: float, right_nm: float) -> None:
+        """Atomic v2 command: scale Nav2 before PI and add residual torque."""
+        message = Float64MultiArray()
+        message.data = [float(scale), float(left_nm), float(right_nm)]
+        self.control_publisher.publish(message)
+
+    def _preview_callback(self, message) -> None:
+        from math import isfinite
+        if (len(message.data) != 3 or not all(isfinite(x) for x in message.data)
+                or message.data[0] < 0.0):
+            return
+        with self._lock:
+            self._preview = tuple(message.data)
+            self._preview_received_at = monotonic()
+
+    def terrain_preview(self, timeout=0.5):
+        with self._lock:
+            if monotonic() - self._preview_received_at > timeout:
+                return [0.0, 0.0, 0.0, 0.0]
+            distance, left, right = self._preview
+            return [distance / 5.0, left / 0.1, right / 0.1, 1.0]
+
+    def measure_impact(self, start, end, sigma=2.0):
+        with self._lock:
+            return self.imu_window.measure(start, end, sigma)
+
+    def ground_truth_ready(self, timeout=2.0):
+        with self._lock:
+            return monotonic() - self._received_at.get("ground_truth", -float("inf")) <= timeout
+
+    def wait_for_v2_controller(self, timeout=5.0):
+        deadline = monotonic() + timeout
+        while self.control_publisher.get_subscription_count() == 0:
+            if monotonic() > deadline:
+                raise RuntimeError("No v2 effort_drive: rebuild nino_control and restart simulator")
+            sleep(0.05)
+
+    def set_world_paused(self, paused, timeout=5.0):
+        if not self.world_control.wait_for_service(timeout_sec=timeout):
+            raise RuntimeError("Missing world control bridge for PPO pause/resume")
+        request = ControlWorld.Request()
+        request.world_control.pause = bool(paused)
+        result = self._wait_future(self.world_control.call_async(request), timeout)
+        if not result.success:
+            raise RuntimeError("Gazebo rejected pause/resume request")
 
     @staticmethod
 

@@ -1,5 +1,5 @@
 seed: 42
-device: cuda
+device: cpu
 control_hz: 10.0
 max_episode_seconds: 120.0
 target_finish_seconds: 90.0
@@ -21,6 +21,32 @@ rollover_limit_deg: 35.0
 lidar_collision_m: 0.10
 sensor_timeout_seconds: 5.0
 
+# v2 is incompatible with old 54-input/two-action checkpoints.
+policy_v2:
+  history_frames: 5
+  imu_includes_gravity: true
+  require_terrain_preview: false
+  preview_timeout_seconds: 0.5
+  simulation_step_wall_timeout_seconds: 10.0
+
+reward_v2:
+  progress_weight: 20.0
+  lateral_weight: 0.8
+  heading_weight: 0.2
+  impact_weight: 0.05
+  impact_acceleration_sigma_m_s2: 2.0
+  body_rate_weight: 0.05
+  attitude_weight: 0.5
+  slip_weight: 0.1
+  smoothness_weight: 0.02
+  effort_weight: 0.01
+  time_penalty: 0.01
+  stall_penalty: 0.5
+  success_bonus: 100.0
+  failure_penalty: 100.0
+  off_path_penalty: 75.0
+  timeout_penalty: 50.0
+
 path:
   lookahead_m: [0.5, 1.0, 2.0, 3.5, 5.0, 7.5, 10.0, 12.5, 15.0]
   default_goal_x_m: 30.0
@@ -40,7 +66,8 @@ navigation:
 
 curriculum:
   enabled: true
-  fixed_phase: 6
+  # Advance manually only after held-out evaluation; train --phase 1..6.
+  fixed_phase: 1
   # Flat -> fixed cable -> random position -> random angle -> random diameter
   # -> multiple cables. Exactly one phase is active in each episode.
   phase_fractions: [0.0, 0.15, 0.30, 0.50, 0.70, 0.85]
@@ -64,6 +91,8 @@ domain_randomization:
   heading_bias_deg: [-1.0, 1.0]
   observation_dropout: [0.00, 0.05]
 
+# Legacy v1 coefficients, retained only for historical comparisons/tests.
+# Active training uses reward_v2 above.
 reward:
   progress_weight: 20.0
   alignment_weight: 16.0
@@ -74,6 +103,11 @@ reward:
   wrong_direction_weight: 2.0
   reverse_weight: 4.0
   wrong_direction_termination_penalty: 100.0
+  rollover_termination_penalty: 100.0
+  collision_termination_penalty: 100.0
+  off_path_termination_penalty: 75.0
+  navigation_invalid_termination_penalty: 25.0
+  action_rate_weight: 0.05
   smoothness_weight: 0.2
   sigma_lateral_m: 0.30
   sigma_heading_rad: 0.35
@@ -93,11 +127,22 @@ reward:
   waypoint_early_bonus: 4.0
   waypoint_late_penalty: 4.0
   attitude_weight: 1.0
+  attitude_roll_threshold_rad: 0.20
+  attitude_pitch_threshold_rad: 0.30
   slip_weight: 0.5
   effort_weight: 0.05
+  # Bounded VDV-inspired impact objective. Acceleration magnitude avoids
+  # treating gravity projection during pitch/roll as a vertical impact.
+  gravity_m_s2: 9.80665
+  impact_weight: 0.25
+  impact_acceleration_sigma_m_s2: 2.0
+  impact_clip_sigma: 3.0
+  body_rate_weight: 0.10
+  body_rate_clip_sigma: 3.0
   # Stable progress bonus and vibration penalty use the complete IMU stream.
   imu_stability_weight: 10.0
   imu_vibration_weight: 0.2
+  imu_vibration_energy_clip: 25.0
   imu_tilt_sigma_rad: 0.20
   imu_angular_rate_sigma_rad_s: 1.0
   imu_acceleration_change_sigma_m_s2: 2.0

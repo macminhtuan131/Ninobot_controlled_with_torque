@@ -1,7 +1,12 @@
 """Run the same hallway task with the normal Linorobot2/Nav2 controller."""
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import (
+    DeclareLaunchArgument,
+    IncludeLaunchDescription,
+    RegisterEventHandler,
+)
+from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
@@ -61,6 +66,15 @@ def generate_launch_description():
             "/world/long_hall/remove@ros_gz_interfaces/srv/DeleteEntity",
         ],
     )
+    readiness = Node(
+        package="nino_rl",
+        executable="wait_for_sim",
+        name="nino_sim_readiness",
+        output="screen",
+    )
+    start_navigation_when_ready = RegisterEventHandler(
+        OnProcessExit(target_action=readiness, on_exit=[navigation])
+    )
     return LaunchDescription(
         [
             DeclareLaunchArgument("headless", default_value="false"),
@@ -71,7 +85,8 @@ def generate_launch_description():
             DeclareLaunchArgument("start_y", default_value="0.0"),
             DeclareLaunchArgument("start_yaw", default_value="0.0"),
             simulator,
-            navigation,
             world_services,
+            start_navigation_when_ready,
+            readiness,
         ]
     )
