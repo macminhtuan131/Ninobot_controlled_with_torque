@@ -1,5 +1,8 @@
 # RL điều khiển mô-men hai bánh cho Nino
 
+**Cập nhật reward/policy:** [công thức và hướng dẫn train](REWARD_POLICY_UPDATE.md).
+Giữ 300 đầu vào/3 action; phải train mới, không resume checkpoint trước bản vá này.
+
 **Bản đang chạy: [thuật toán v2](ALGORITHM_V2.md).** Policy có 3 action và
 300 đầu vào (5 frame × 60). Reward đang dùng ở `nino_rl/control_v2.py`, cấu hình
 `reward_v2`. Các mô tả 54 đầu vào/2 action phía dưới là ghi chép v1; không dùng

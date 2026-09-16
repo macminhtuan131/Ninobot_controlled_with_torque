@@ -1,5 +1,8 @@
 # Nino Nav2-guided wheel-torque RL
 
+**Latest reward/policy patch:** [formulas, application and training guide](REWARD_POLICY_UPDATE.md).
+Start a new run for the history-encoded policy; pre-patch checkpoints cannot be resumed.
+
 **Current implementation: [algorithm v2](ALGORITHM_V2.md).** Active policy has
 three actions (speed scale, common torque, differential torque) and 300 stacked
 inputs. Use that guide for reward, curriculum and commands. The 54-input,

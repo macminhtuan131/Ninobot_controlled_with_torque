@@ -9,7 +9,9 @@ The `add_rl` branch also includes CPU-first PPO training, evaluation,
 and a Nav2-aware wheel-torque policy. See the complete Vietnamese guide:
 [src/nino_rl/README_VI.md](src/nino_rl/README_VI.md).
 
-The current Nav2-guided architecture, 54-value observation, six-phase terrain
+The current [reward and history-policy update](src/nino_rl/REWARD_POLICY_UPDATE.md)
+uses 300 stacked inputs and 3 residual-control actions. Start a fresh training run
+for this update. The Nav2-guided architecture, six-phase terrain
 curriculum, mandatory preflight, baseline comparison, and preserved-map notes
 are documented in [src/nino_rl/README.md](src/nino_rl/README.md).
 

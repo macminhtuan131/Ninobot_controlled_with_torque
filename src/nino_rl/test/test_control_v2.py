@@ -190,7 +190,7 @@ class TestActuator(unittest.TestCase):
 
 
 class TestEnvironmentContract(unittest.TestCase):
-    def run_step(self, collision=False):
+    def run_step(self, collision=False, timed_out=False, torque_fresh=True):
         source = ROOT / "src/nino_rl/nino_rl/ros_env.py"
         cls = next(x for x in ast.parse(source.read_text()).body if isinstance(x, ast.ClassDef))
         step = next(x for x in cls.body if isinstance(x, ast.FunctionDef) and x.name == "step")
@@ -213,6 +213,7 @@ class TestEnvironmentContract(unittest.TestCase):
         ros = SimpleNamespace(
             publish_control=lambda *args: commands.append(args),
             snapshot=lambda: state, ground_truth_ready=lambda: True,
+            applied_torque_ready=lambda: torque_fresh,
             nav_path_in_odom=lambda _: None,
             measure_impact=lambda start, end, sigma: dict(duration=end-start,
                 square_integral=0., impact_integral=0., peak=0.),
@@ -240,6 +241,8 @@ class TestEnvironmentContract(unittest.TestCase):
                     "max_tilt_deg", "max_path_deviation", "slip_square_sum", "max_abs_slip",
                     "torque_square_sum", "max_abs_torque", "accel_square_sum"):
             setattr(env, key, 0.)
+        if timed_out:
+            env.config["max_episode_seconds"] = .05
         return namespace["step"](env, BASELINE_ACTION.copy()), commands
 
     def test_step_emits_300_values_and_atomic_3_value_command(self):
@@ -257,6 +260,18 @@ class TestEnvironmentContract(unittest.TestCase):
         self.assertEqual(info["episode_metrics"]["termination"], "collision")
         self.assertEqual(commands[-1], (0., 0., 0.))
         self.assertIn("rms_vertical_acceleration_m_s2", info["episode_metrics"])
+
+    def test_mission_deadline_does_not_bootstrap(self):
+        (_, _, terminated, truncated, info), commands = self.run_step(timed_out=True)
+        self.assertTrue(terminated)
+        self.assertFalse(truncated)
+        self.assertEqual(info["reward_terms"]["terminal"], -50)
+        self.assertEqual(info["episode_metrics"]["termination"], "timeout")
+        self.assertEqual(commands[-1], (0., 0., 0.))
+
+    def test_missing_effort_feedback_aborts(self):
+        with self.assertRaisesRegex(RuntimeError, "torque feedback stale"):
+            self.run_step(torque_fresh=False)
 
 
 if __name__ == "__main__":

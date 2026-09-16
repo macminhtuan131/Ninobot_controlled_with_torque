@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from math import atan2, cos, sin, sqrt
+from math import atan2, cos, sin, sqrt, isfinite
 
 import os
 
@@ -639,6 +639,12 @@ class RosRobotInterface(Node):
     def ground_truth_ready(self, timeout=2.0):
         with self._lock:
             return monotonic() - self._received_at.get("ground_truth", -float("inf")) <= timeout
+
+    def applied_torque_ready(self, timeout=0.5):
+        with self._lock:
+            return (monotonic() - self._received_at.get("torque", -float("inf")) <= timeout
+                    and isfinite(self._state.applied_left_torque)
+                    and isfinite(self._state.applied_right_torque))
 
     def wait_for_v2_controller(self, timeout=5.0):
         deadline = monotonic() + timeout

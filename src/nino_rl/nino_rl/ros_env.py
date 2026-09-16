@@ -30,7 +30,7 @@ from nino_rl.control_v2 import (
 
 
 class NinoGazeboEnv(gym.Env):
-    """Continuous two-action environment: normalized left and right torque."""
+    """Three-action AMR environment: speed scale and forward/yaw residuals."""
 
     metadata = {"render_modes": []}
 
@@ -344,6 +344,8 @@ class NinoGazeboEnv(gym.Env):
         action = np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0)
         scale, torque = decode_action(action, self.action_scale)
         started_sim = self._sim_seconds()
+        reward_reference = self._reference(
+            self.previous_tracking, started_sim - self.episode_started_sim)
         delay = min(self.control_dt * 0.8, self._randomization["delay"])
         if delay > 0.0:
             sleep(delay)
@@ -375,6 +377,9 @@ class NinoGazeboEnv(gym.Env):
             self.ros.publish_control(0.0, 0.0, 0.0)
             raise RuntimeError("Ground truth velocity stale; slip reward cannot be computed")
         truth = self.ros.snapshot()
+        if not self.ros.applied_torque_ready():
+            self.ros.publish_control(0.0, 0.0, 0.0)
+            raise RuntimeError("Applied torque feedback stale; effort reward cannot be computed")
         # Keep waypoint identities fixed in the map, while applying AMCL's
         # latest correction when comparing against wheel odometry. Freezing
         # the initial map->odom transform produces false endpoint failures.
@@ -444,8 +449,11 @@ class NinoGazeboEnv(gym.Env):
             or off_path
             or navigation_invalid
             or collision
+            or timed_out
         )
-        truncated = bool(timed_out and not terminated)
+        # The configured mission deadline is a task failure, not an external
+        # rollout cutoff. SB3 must not bootstrap a fictitious continuation.
+        truncated = False
         _, level, _ = self._curriculum_stage()
         delta_s = self.previous_tracking.distance_remaining - tracking.distance_remaining
         stalled = self.stall_window.update(elapsed, delta_s,
@@ -455,9 +463,10 @@ class NinoGazeboEnv(gym.Env):
             self.previous_tracking, tracking, truth, action, self.previous_action,
             torque, step_dt, imu,
             {**self.config["reward_v2"], "torque_scale_nm": self.action_scale},
-            timed_out=truncated,
+            timed_out=timed_out,
             succeeded=succeeded,
             failed=failed, stalled=stalled, impact_scale=min(1.0, 0.25 + level),
+            reference=reward_reference, previous_state=self.previous_robot_state,
         )
         self.episode_return += reward
         self.abs_lateral_sum += abs(tracking.lateral_error)
@@ -506,7 +515,8 @@ class NinoGazeboEnv(gym.Env):
         info = {
             "attempt": self.attempt_number,
             "reward_terms": reward_terms,
-            "applied_torque_nm": torque.tolist(),
+            "applied_torque_nm": measured_torque.tolist(),
+            "residual_torque_nm": torque.tolist(),
             **metrics_dict(tracking, truth, elapsed, succeeded),
         }
         if terminated or truncated:

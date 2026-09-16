@@ -13,6 +13,7 @@ import numpy as np
 
 from nino_rl.core import load_config
 from nino_rl.control_v2 import validate_model
+from nino_rl.training_contract import training_contract, validate_resume
 
 
 def arguments() -> argparse.Namespace:
@@ -41,6 +42,7 @@ def main() -> None:
         from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
         from stable_baselines3.common.env_checker import check_env
         from stable_baselines3.common.monitor import Monitor
+        from nino_rl.policies import policy_spec
     except ImportError as error:
         raise SystemExit(
             "Thiếu thư viện RL. Kích hoạt .venv và chạy: "
@@ -138,18 +140,16 @@ def main() -> None:
         if args.resume:
             model = PPO.load(args.resume, device=device)
             validate_model(model, env.history.size)
+            validate_resume(model, config)
             model.set_env(monitored)
             model.tensorboard_log = str(tensorboard_dir)
             env.global_steps = int(model.num_timesteps)
             env.total_training_steps = int(model.num_timesteps) + args.timesteps
             reset_num_timesteps = False
         else:
-            activation = {"elu": th.nn.ELU, "relu": th.nn.ReLU, "tanh": th.nn.Tanh}[
-                str(ppo["activation"]).lower()
-            ]
-            layers = [int(value) for value in ppo["policy_layers"]]
+            policy_class, policy_kwargs = policy_spec(config)
             model = PPO(
-                "MlpPolicy",
+                policy_class,
                 monitored,
                 learning_rate=float(ppo["learning_rate"]),
                 gamma=float(ppo["gamma"]),
@@ -161,15 +161,14 @@ def main() -> None:
                 ent_coef=float(ppo["ent_coef"]),
                 vf_coef=float(ppo["vf_coef"]),
                 max_grad_norm=float(ppo["max_grad_norm"]),
-                policy_kwargs={
-                    "activation_fn": activation,
-                    "net_arch": {"pi": layers, "vf": layers},
-                },
+                target_kl=float(ppo["target_kl"]),
+                policy_kwargs=policy_kwargs,
                 tensorboard_log=str(tensorboard_dir),
                 device=device,
                 seed=int(config["seed"]),
                 verbose=1,
             )
+            model.nino_training_contract = training_contract(config)
             reset_num_timesteps = True
 
         checkpoint_callback = CheckpointCallback(

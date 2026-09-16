@@ -1,5 +1,9 @@
 # Reward and policy v2
 
+**Updated reward and policy:** [REWARD_POLICY_UPDATE.md](REWARD_POLICY_UPDATE.md)
+supersedes the reward coefficients, network architecture, deadline handling and
+resume instructions below. The 300-input/3-action transport contract is unchanged.
+
 This is a new controller contract. Do not resume or deploy a v1 checkpoint.
 The default input is 5 x 60 = 300 values; the action is 3 values. Active math
 is in `nino_rl/control_v2.py`. The old `core.compute_reward` and YAML `reward`

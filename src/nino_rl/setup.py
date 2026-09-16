@@ -14,7 +14,8 @@ setup(
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
         (
             "share/" + package_name,
-            ["package.xml", "requirements.txt", "README.md", "README_VI.md", "ALGORITHM_V2.md"],
+            ["package.xml", "requirements.txt", "README.md", "README_VI.md", "ALGORITHM_V2.md",
+             "REWARD_POLICY_UPDATE.md"],
         ),
         (os.path.join("share", package_name, "config"), glob("config/*.yaml")),
         (os.path.join("share", package_name, "launch"), glob("launch/*.launch.py")),
