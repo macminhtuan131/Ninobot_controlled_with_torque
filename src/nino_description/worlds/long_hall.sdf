@@ -1,8 +1,10 @@
 <?xml version="1.0"?>
 <sdf version="1.9">
   <world name="long_hall">
-    <physics name="1ms" type="ignored">
-      <max_step_size>0.001</max_step_size>
+    <physics name="2ms_training" type="ignored">
+      <!-- Keep cable contacts stable while reducing the cost of the original
+           1 ms world.  At <=0.4 m/s this is <=0.8 mm motion per step. -->
+      <max_step_size>0.002</max_step_size>
       <real_time_factor>1.0</real_time_factor>
     </physics>
 

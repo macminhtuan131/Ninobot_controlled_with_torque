@@ -1,11 +1,7 @@
 frame_id: odom
-# Đường mặc định qua tâm hành lang. policy_node sẽ dùng /plan của Nav2 khi
-# nhận được nav_msgs/Path hợp lệ, nếu không sẽ dùng đường này.
+# Fixed straight reference in odom. Nav2 and /plan are intentionally unused.
 waypoints:
   - [0.0, 0.0]
-  - [5.0, 0.0]
-  - [10.0, 0.0]
-  - [15.0, 0.0]
-  - [20.0, 0.0]
-  - [25.0, 0.0]
-  - [30.0, 0.0]
+  - [2.0, 0.0]
+  - [4.0, 0.0]
+  - [6.0, 0.0]

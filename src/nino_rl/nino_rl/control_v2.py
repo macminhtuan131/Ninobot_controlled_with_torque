@@ -110,6 +110,43 @@ class ImuWindow:
                 "duration": duration, "square_integral": square,
                 "impact_integral": fourth, "peak": peak}
 
+    def estimate(self, start, end, sigma=2.0, max_sample_age=0.2):
+        """Return a full-window estimate without hiding stale/missing data.
+
+        Gazebo can defer IMU publication while executing a large multi_step
+        request. If part of the action is covered, preserve its measured mean
+        energy and normalize it over the requested duration. With no overlap,
+        only a recent held sample is used; otherwise the estimate is zero.
+        The original coverage is reported for evaluation diagnostics.
+        """
+        result = self.measure(start, end, sigma)
+        window = end - start
+        coverage = result["duration"]
+        result["coverage_fraction"] = coverage / window
+        result["estimated"] = coverage + 1e-9 < window
+        if coverage > 1e-9:
+            scale = window / coverage
+            result["square_integral"] *= scale
+            result["impact_integral"] *= scale
+            result["duration"] = window
+            return result
+        if self.samples and self.samples[-1][0] >= start - max_sample_age:
+            az = self.samples[-1][1]
+            result.update(
+                duration=window,
+                square_integral=az * az * window,
+                impact_integral=min((abs(az) / sigma) ** 4, 81.0) * window,
+                peak=abs(az),
+            )
+            return result
+        result.update(
+            duration=window,
+            square_integral=0.0,
+            impact_integral=0.0,
+            peak=0.0,
+        )
+        return result
+
 
 class StallWindow:
     def __init__(self, seconds=3.0, progress=0.05):
@@ -136,7 +173,7 @@ def compute_reward(previous, current, state, action, previous_action, torque,
                    reference=None, previous_state=None):
     """AMR reward with v2 I/O; see REWARD_POLICY_UPDATE.md for the objective.
 
-    Tracking uses an unscaled pre-action Nav2 reference and simulation truth
+    Tracking uses an unscaled pre-action baseline reference and simulation truth
     speeds. Never use the action-scaled reference: stopping would then remove
     its own tracking error. Total torque feedback is the controller's limited
     effort command, not a motor current measurement or energy measurement.

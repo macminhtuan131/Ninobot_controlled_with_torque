@@ -1,7 +1,7 @@
 controller_manager:
   ros__parameters:
-    # Match the world's 1 ms physics step to avoid control/simulation aliasing.
-    update_rate: 1000
+    # Match the training world's 2 ms physics step.
+    update_rate: 500
     use_sim_time: true
     enforce_command_limits: true
 
@@ -19,6 +19,6 @@ wheel_effort_controller:
 
 joint_state_broadcaster:
   ros__parameters:
-    # Supply fresh velocity feedback to the 1 kHz effort loop, including
+    # Supply fresh velocity feedback to the 500 Hz effort loop, including
     # while a wheel is briefly unloaded as it crosses a cable.
     update_rate: 500

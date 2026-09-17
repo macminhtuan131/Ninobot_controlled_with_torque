@@ -2,7 +2,7 @@
 <package format="3">
   <name>nino_rl</name>
   <version>0.1.0</version>
-  <description>PPO training, evaluation, and Nav2 policy execution for Nino wheel-torque control.</description>
+  <description>PPO training and straight-trajectory evaluation for Nino wheel-torque control.</description>
 
   <maintainer email="maintainer@example.com">Nino Robot Maintainer</maintainer>
   <license>Apache-2.0</license>
@@ -14,8 +14,6 @@
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
-  <exec_depend>nav2_msgs</exec_depend>
-  <exec_depend>linorobot2_navigation</exec_depend>
   <exec_depend>nino_control</exec_depend>
   <exec_depend>nino_description</exec_depend>
   <exec_depend>python3-numpy</exec_depend>

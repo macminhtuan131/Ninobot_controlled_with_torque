@@ -51,6 +51,23 @@ class TestV2(unittest.TestCase):
         window.add(-1, 0)
         self.assertEqual(len(window.samples), 1)
 
+    def test_partial_imu_energy_is_normalized_for_trajectory_training(self):
+        window = ImuWindow()
+        window.add(0.0, 2.0)
+        window.add(0.02, 4.0)
+        result = window.estimate(0.0, 0.1)
+        self.assertEqual(result["duration"], 0.1)
+        self.assertAlmostEqual(result["coverage_fraction"], 1.0)
+        self.assertFalse(result["estimated"])
+
+        partial = ImuWindow()
+        partial.add(0.0, 2.0)
+        result = partial.estimate(0.0, 0.2)
+        self.assertEqual(result["duration"], 0.2)
+        self.assertAlmostEqual(result["coverage_fraction"], 0.5)
+        self.assertTrue(result["estimated"])
+        self.assertAlmostEqual(result["square_integral"], 0.8)
+
     def test_action_mapping_baseline_brake_and_yaw(self):
         scale, torque = decode_action(BASELINE_ACTION)
         self.assertEqual(scale, 1)
@@ -165,7 +182,7 @@ class TestActuator(unittest.TestCase):
         np.testing.assert_allclose(self.drive.target_velocity, [4, 4])
         self.assertGreater(self.commands[-1][0], 0)
 
-    def test_expired_policy_does_not_revert_to_full_speed_nav2(self):
+    def test_expired_policy_does_not_revert_to_full_speed_baseline(self):
         self.command([1, .5, .5])
         self.drive.last_torque_ns = self.now - 300_000_000
         self.update()
@@ -191,7 +208,9 @@ class TestActuator(unittest.TestCase):
 
 
 class TestEnvironmentContract(unittest.TestCase):
-    def run_step(self, collision=False, timed_out=False, torque_fresh=True, baseline=False, torque_noise=0.):
+    def run_step(self, collision=False, timed_out=False, torque_fresh=True,
+                 baseline=False, torque_noise=0., navigation_invalid=False,
+                 goal_overshoot=False):
         source = ROOT / "src/nino_rl/nino_rl/ros_env.py"
         cls = next(x for x in ast.parse(source.read_text()).body if isinstance(x, ast.ClassDef))
         step = next(x for x in cls.body if isinstance(x, ast.FunctionDef) and x.name == "step")
@@ -205,27 +224,43 @@ class TestEnvironmentContract(unittest.TestCase):
             goal_reached=goal_reached, is_wrong_direction=is_wrong_direction,
             metrics_dict=metrics_dict, wheel_slip_ratios=wheel_slip_ratios)
         exec(compile(ast.Module(body=[step], type_ignores=[]), str(source), "exec"), namespace)
-        state = RobotState(odom_stamp_s=.1, x=.02, accel_z=9.80665,
+        state = RobotState(odom_stamp_s=.1, x=30.001 if goal_overshoot else .02,
+                           linear_velocity=.2 if goal_overshoot else 0.0,
+                           accel_z=9.80665,
                            lidar_ranges=[.05 if collision else 3.0])
         path = PathTracker([(0, 0), (30, 0)])
         history = ObservationHistory(5)
         history.reset(np.zeros(FRAME_SIZE))
-        reference = NavReference(desired_linear_velocity=.3, valid=True)
+        reference = NavReference(
+            desired_linear_velocity=.3, valid=not navigation_invalid
+        )
         ros = SimpleNamespace(
             publish_control=lambda *args: commands.append(args),
+            publish_straight_command=lambda speed: None,
+            advance_world=lambda steps, timeout: clock.__setitem__(
+                0, clock[0] + steps * .001
+            ),
+            sensor_markers=lambda names: {name: 0.0 for name in names},
+            wait_for_sensor_updates=lambda previous, timeout: None,
             snapshot=lambda: state, ground_truth_ready=lambda: True,
-            applied_torque_ready=lambda: torque_fresh,
+            ground_truth_valid=lambda: True,
+            applied_torque_valid=lambda: torque_fresh,
             pose_in_frame=lambda s, frame: (s.x, s.y, s.yaw),
             nav_path_in_odom=lambda _: None,
             wait_for_impact=lambda start, end, sigma, *args: dict(duration=end-start,
                 square_integral=0., impact_integral=0., peak=0.),
+            estimate_impact=lambda start, end, sigma: dict(duration=end-start,
+                square_integral=0., impact_integral=0., peak=0.),
             get_logger=lambda: SimpleNamespace(warn=lambda _: None))
         env = SimpleNamespace(config=deepcopy(CONFIG), action_scale=.5, control_dt=.1,
+            physics_dt=.005, physics_steps_per_control=20, world_is_paused=True,
             _randomization={"delay": 0., "traction": 1., "torque_noise": torque_noise},
-            _sim_seconds=lambda: clock[0], ros=ros, episode_steps=0, global_steps=0,
+            lockstep_sim_time=1.0, ros=ros, episode_steps=0, global_steps=0,
             episode_started_sim=1., episode_start_time_unix=0.,
             np_random=np.random.default_rng(42), _episode_nav_path=None,
             path=path, lookahead=CONFIG["path"]["lookahead_m"],
+            _straight_command=lambda distance: 0.3,
+            _past_goal_distance=lambda state: state.x - 30.0,
             previous_tracking=TrackingState(0, 0, 0, 30, 30),
             previous_robot_state=RobotState(accel_z=9.80665),
             previous_action=BASELINE_ACTION.copy(), action_before_previous=BASELINE_ACTION.copy(),
@@ -238,6 +273,11 @@ class TestEnvironmentContract(unittest.TestCase):
             history=history, _curriculum_stage=lambda: (0, 0., 30), stall_window=StallWindow(),
             off_path_steps=0, off_path_seconds=0., nav_invalid_steps=0, nav_invalid_seconds=0.,
             wrong_direction_steps=0, wrong_direction_seconds=0., attempt_number=1)
+        env.terrain_feature_count = 0
+        env.terrain_features_per_success = 1
+        env.max_terrain_features = 20
+        env.adaptive_terrain_progress = True
+        env.successful_episodes = 0
         for key in ("vertical_square_integral", "imu_coverage_seconds", "peak_vertical_acceleration",
                     "episode_return", "abs_lateral_sum", "lateral_square_sum", "abs_roll_sum",
                     "abs_pitch_sum", "imu_angular_xy_sum", "imu_acceleration_change_sum",
@@ -245,6 +285,8 @@ class TestEnvironmentContract(unittest.TestCase):
                     "torque_square_sum", "max_abs_torque", "accel_square_sum"):
             setattr(env, key, 0.)
         env.config["evaluation_baseline"] = baseline
+        if navigation_invalid:
+            env.config["navigation_invalid_hold_seconds"] = .05
         env.trajectory.add(0.0, 0.0, 0.0, 0.0)
         if timed_out:
             env.config["max_episode_seconds"] = .05
@@ -281,8 +323,30 @@ class TestEnvironmentContract(unittest.TestCase):
         self.assertNotEqual(rl_commands[0][1:], (0., 0.))
 
     def test_missing_effort_feedback_aborts(self):
-        with self.assertRaisesRegex(RuntimeError, "torque feedback stale"):
+        with self.assertRaisesRegex(RuntimeError, "torque feedback is invalid"):
             self.run_step(torque_fresh=False)
+
+    def test_stale_navigation_terminates_episode_instead_of_training_run(self):
+        (_, reward, terminated, truncated, info), commands = self.run_step(
+            navigation_invalid=True
+        )
+        self.assertTrue(terminated)
+        self.assertFalse(truncated)
+        self.assertEqual(info["episode_metrics"]["termination"], "navigation_invalid")
+        self.assertEqual(info["reward_terms"]["terminal"], -100.0)
+        self.assertEqual(commands[-1], (0.0, 0.0, 0.0))
+
+    def test_passing_goal_without_stopping_ends_episode_immediately(self):
+        (_, reward, terminated, truncated, info), commands = self.run_step(
+            goal_overshoot=True
+        )
+        self.assertTrue(terminated)
+        self.assertFalse(truncated)
+        self.assertEqual(info["episode_metrics"]["termination"], "goal_overshoot")
+        self.assertFalse(info["episode_metrics"]["goal_reached"])
+        self.assertGreater(info["episode_metrics"]["past_goal_distance_m"], 0.0)
+        self.assertEqual(info["reward_terms"]["terminal"], -100.0)
+        self.assertEqual(commands[-1], (0.0, 0.0, 0.0))
 
 
 if __name__ == "__main__":

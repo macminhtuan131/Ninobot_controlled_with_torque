@@ -3,7 +3,7 @@ from copy import deepcopy
 
 
 def training_contract(config):
-    return {"revision": 4, **{key: deepcopy(value) for key, value in config.items()
+    return {"revision": 9, **{key: deepcopy(value) for key, value in config.items()
             if key not in ("device", "seed", "curriculum", "terrain_curriculum", "reward")}}
 
 

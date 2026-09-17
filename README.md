@@ -1,10 +1,11 @@
-# Nino: Nav2 + residual PPO, CUDA training and trajectory evaluation
+# Nino: straight-line residual PPO and trajectory evaluation
 
 This branch controls the **caster-supported differential-drive Nino AMR** in
 ROS 2 Jazzy / Gazebo Harmonic. The model has two powered wheels, two passive
 casters, IMU, wheel encoders and **2D** LiDAR. It is not an unsupported two-wheel
-inverted pendulum. The pipeline is Nav2 → wheel-speed PI + bounded PPO residuals
-→ effort controller. PPO also scales the Nav2 velocity reference.
+inverted pendulum. Nav2 is disabled for this experiment. The pipeline is a
+direct straight `/cmd_vel` reference → wheel-speed PI + bounded PPO residuals
+→ effort controller. PPO also scales the forward velocity reference.
 
 The updated workflow uses NVIDIA CUDA by default and refuses an automatic CPU
 fallback. Gazebo physics and ROS still consume CPU; this is one Gazebo world,
@@ -16,7 +17,7 @@ process connected to that world at a time.
 - [Simulation and hardware reference](docs/HARDWARE_REFERENCE.md)
 
 Start a **new training run** after applying this update: reward, timing and
-randomization semantics have changed (training contract revision 4). Earlier
+terrain/control semantics have changed (training contract revision 9). Earlier
 300-input/3-action checkpoints remain structurally usable for inference, but
 cannot be resumed into this training contract. Old 54-input/2-action models are
 incompatible. No pretrained weights or measured performance gains are included.
@@ -158,16 +159,45 @@ source install/setup.bash
 
 ## 6. Start simulation and check it
 
+Set the endpoint and forward controller in `src/nino_rl/config/ppo.yaml`:
+
+```yaml
+goal_tolerance_m: 0.01
+navigation:
+  start_pose: [0.0, 0.0, 0.0]
+  goal_pose: [6.0, 0.0, 0.0]
+  straight_speed_m_s: 0.75
+  minimum_approach_speed_m_s: 0.03
+  goal_slowdown_distance_m: 1.00
+```
+
+The robot is successful only when its endpoint distance is at most 1 cm and
+the other configured arrival safety checks pass. The direct command always has
+`angular.z = 0`; the residual policy may apply differential wheel correction to
+counter drift while following the straight reference. The curriculum cable is
+at `x=4 m`, leaving 2 m for recovery and drift measurement before the 6 m goal.
+With `headless:=false`, Gazebo displays the goal as a bright green disc, pole,
+and flag. The marker is visual-only and cannot collide with the robot or LiDAR.
+
+If the robot crosses the goal plane without meeting the 1 cm/low-speed arrival
+criteria, the episode ends immediately as `goal_overshoot` and the next episode
+starts. After each successful episode, one extra side feature is added near the
+cable zone, cycling through pothole-like rough patches, obstacles, and short
+cables until 20 are present. A ±0.60 m center corridor always remains clear.
+
 Terminal A:
 
 ```bash
-ros2 launch nino_rl training_sim.launch.py headless:=true rviz:=false
+ros2 launch nino_rl training_sim.launch.py headless:=true
 ```
 
-For visual debugging, stop that launch and restart with
-`headless:=false rviz:=true`. Do not launch both copies. This training launch
-starts the effort controller, sensors, AMCL/Nav2 and Gazebo reset services.
-Wait for readiness/localization. Terminal B:
+For visual debugging, stop that launch and restart with `headless:=false`.
+Do not launch both copies. This training launch
+starts the effort controller, sensors and Gazebo reset services. It does not
+start Nav2, AMCL, a map server, or a planner.
+It refuses to start if the same Gazebo world is already running; this prevents
+multiple `/clock` and IMU publishers from corrupting lockstep training.
+Wait for the simulator and controllers. Terminal B:
 
 ```bash
 ros2 control list_controllers
@@ -212,12 +242,14 @@ tensorboard --logdir rl_runs --port 6006
 
 Open `http://localhost:6006`. Inspect success, path RMSE/P95, completion,
 heading RMSE, impact RMS, torque, reward terms and PPO KL/entropy together.
-Gazebo is paused during optimizer updates so an update does not consume the
-mission deadline. CUDA memory usage alone is not evidence of successful learning.
+Gazebo uses lockstep training: every action advances exactly 50 two-ms physics
+steps (0.1 simulated seconds), then waits for fresh sensor and torque feedback while
+paused. Optimizer wall time therefore cannot consume the mission deadline.
+CUDA memory usage alone is not evidence of successful learning.
 
 A Ctrl-C or runtime transport failure saves `nino_ppo_interrupted.zip` if a
 model exists; its unfinished rollout is discarded on resume. Fix the transport
-problem before continuing. Resume only revision-4 runs with their saved config:
+problem before continuing. Resume only revision-9 runs with their saved config:
 
 ```bash
 ros2 run nino_rl train --device cuda --phase 1 --timesteps 500000 \
@@ -244,7 +276,11 @@ ros2 run nino_rl evaluate --device cuda --phase 1 --episodes 20 --seed 10000 \
 
 Each command prints a timestamped report directory. It contains `summary.json`,
 `episodes.csv`, a config/metadata snapshot, and for every completed episode:
-`episode-001/actual.csv`, `reference.csv`, and `metrics.json`. Automatic metrics
+`episode-001/trajectory.csv`, `actual.csv`, `reference.csv`, `metrics.json`, and
+`trajectory.png`. `trajectory.csv` contains `time_s,x_m,y_m,yaw_rad,frame_id`
+and can be loaded directly by pandas, a spreadsheet, or MATLAB. The PNG overlays
+the fixed straight reference and the measured robot trajectory.
+Automatic metrics
 include time-weighted path/cross-track RMSE, P95/max path error, heading RMSE,
 endpoint error, completion, backtracking, success, timing, slip, torque and IMU
 impact. Incomplete evaluations are marked and cannot be compared as full runs.
@@ -260,22 +296,30 @@ Compare **success first**, then errors/comfort and successful completion time.
 A stopped or failed robot can have low RMSE. Reports separate all episodes from
 successful episodes. The comparator checks phase, seeds, count, perturbation
 mode and task config. Matching seeds reproduce the terrain draws; they do not
-make asynchronous Gazebo/Nav2 execution bitwise deterministic.
+make asynchronous ROS/Gazebo execution bitwise deterministic.
 
 `--randomized` on **both** evaluators tests full-strength residual/sensor
-perturbations even in phase 1. These are not physical friction/mass changes.
+perturbations. These are not physical friction/mass changes.
 The baseline receives zero residual torque, including under randomized testing.
 
-## 9. Advance the terrain curriculum after evaluation
+## 9. Run the cable phases after evaluation
 
-| Phase | Terrain | Training perturbation strength |
-|---|---|---:|
-| 1 | Flat | 0% |
-| 2 | One fixed cable | 20% |
-| 3 | Random cable position | 40% |
-| 4 | Random angle | 60% |
-| 5 | Random diameter | 80% |
-| 6 | Multiple cables | 100% |
+Every phase has exactly one cable at 4 m. The requested order is hard to easy;
+only cable diameter and absolute angle define phase difficulty. The sign of a
+nonzero angle is randomized so the policy does not favor one wheel.
+
+| Phase | Difficulty | Diameter | Absolute angle |
+|---|---|---:|---:|
+| 1 | Hardest | 44 mm | 45 degrees |
+| 2 | Very hard | 38 mm | 36 degrees |
+| 3 | Hard | 32 mm | 27 degrees |
+| 4 | Medium | 26 mm | 18 degrees |
+| 5 | Easy | 20 mm | 9 degrees |
+| 6 | Easiest | 12 mm | 0 degrees |
+
+Domain randomization is disabled by default so the phase comparison is based
+only on size and angle. Use `--randomized` during evaluation only when you
+specifically want a robustness test.
 
 Suggested initial gate: at least 19/20 held-out successes, no rollover/collision,
 acceptable P95 path error (e.g. <0.25 m for this hallway), and no material comfort
@@ -289,11 +333,10 @@ ros2 run nino_rl train --device cuda --phase 2 --timesteps 500000 \
 ```
 
 Evaluate phase 2 using the same phase/seeds for baseline and PPO. Repeat for
-phases 3–6, resuming the preceding successful phase. Do not start phase 6 from
-random weights. Keep several checkpoints; the final one is not automatically
-best. Evaluate them on the same development seeds, then test the chosen model
-on new seeds. Do not run an evaluation callback against the same live world
-while the trainer is collecting a rollout.
+phases 3–6, resuming the preceding phase. Keep several checkpoints; the final
+one is not automatically best. Evaluate them on the same development seeds,
+then test the chosen model on new seeds. Do not run an evaluation callback
+against the same live world while the trainer is collecting a rollout.
 
 ## 10. Compare against your own ideal path or timed trajectory
 
@@ -317,7 +360,7 @@ metrics record `clock_origin_sim_s` for converting absolute simulator timestamps
 Coverage is reported so an early-ending run cannot hide unobserved reference
 time. Choose the gap limit according to your sampling rate, not to conceal loss.
 
-A Nav2 path has no desired timestamps. Its default automatic score is therefore
+A geometric straight path has no desired timestamps. Its default automatic score is therefore
 **path RMSE**, not timed position RMSE. Poses are wheel odometry transformed by
 localization, not external ground truth. For physical accuracy studies, export
 motion-capture or correctly transformed simulator ground-truth poses instead.
@@ -341,7 +384,7 @@ PYTHONPATH=src/nino_rl python -m nino_rl.trajectory_metrics --help
 | Zero torque preflight | Use training launch, active effort controller, `accept_torque=True` |
 | IMU coverage timeout | Check `/clock`, `/imu/data` stamps and load; the bounded wait handles delivery races but does not fabricate samples |
 | Resume contract error | Use matching post-update run/config, or start a new run |
-| Missing map/odom TF | Wait for AMCL/Nav2 startup; do not compare poses in different frames |
+| No `/cmd_vel` subscriber | Rebuild `nino_control`, restart the simulation, and rerun preflight |
 
 This patch does not introduce SWAE, a 3D terrain map, an ESKF, Isaac Lab,
 asymmetric privileged critics, or unvalidated slope balancing. The existing

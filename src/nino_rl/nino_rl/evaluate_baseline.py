@@ -1,4 +1,4 @@
-"""Nav2/PI baseline with the exact same scoring pipeline as PPO."""
+"""Straight-line PI baseline with the exact same scoring pipeline as PPO."""
 from nino_rl.evaluation import run
 
 

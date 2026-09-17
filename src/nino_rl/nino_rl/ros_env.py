@@ -12,6 +12,7 @@ import numpy as np
 import rclpy
 from gymnasium import spaces
 from rclpy.executors import MultiThreadedExecutor
+from rclpy.signals import SignalHandlerOptions
 
 from nino_rl.core import (
     NavReference,
@@ -31,7 +32,7 @@ from nino_rl.control_v2 import (
 
 
 class NinoGazeboEnv(gym.Env):
-    """Three-action AMR environment: speed scale and forward/yaw residuals."""
+    """Straight-line AMR environment: speed scale and wheel residuals."""
 
     metadata = {"render_modes": []}
 
@@ -41,6 +42,17 @@ class NinoGazeboEnv(gym.Env):
         self.world_paused_for_update = False
         self.total_training_steps = max(1, int(total_training_steps))
         self.control_dt = 1.0 / float(config["control_hz"])
+        self.physics_dt = float(
+            config["policy_v2"].get("simulation_physics_step_seconds", 0.005)
+        )
+        step_ratio = self.control_dt / self.physics_dt
+        self.physics_steps_per_control = int(round(step_ratio))
+        if (self.physics_dt <= 0.0 or self.physics_steps_per_control < 1
+                or not np.isclose(step_ratio, self.physics_steps_per_control)):
+            raise ValueError(
+                "control period must be an integer multiple of the Gazebo physics step"
+            )
+        self.world_is_paused = False
         self.max_steps = int(float(config["max_episode_seconds"]) / self.control_dt)
         self.action_scale = float(config["max_wheel_torque_nm"])
         self.lookahead = list(config["path"]["lookahead_m"])
@@ -53,12 +65,27 @@ class NinoGazeboEnv(gym.Env):
 
         self._owns_rclpy = not rclpy.ok()
         if self._owns_rclpy:
-            rclpy.init(args=[])
+            # Keep the context alive during Python's KeyboardInterrupt handler
+            # so close() can stop the robot and unpause the lockstep world.
+            rclpy.init(args=[], signal_handler_options=SignalHandlerOptions.NO)
         navigation = config["navigation"]
         self.start_pose = tuple(float(value) for value in navigation["start_pose"])
         self.goal_pose = tuple(float(value) for value in navigation["goal_pose"])
         self.nav_stale_seconds = float(navigation["stale_seconds"])
-        self.nav_startup_timeout = float(navigation["startup_timeout_seconds"])
+        self.straight_speed = float(navigation["straight_speed_m_s"])
+        self.minimum_approach_speed = float(
+            navigation.get("minimum_approach_speed_m_s", 0.03)
+        )
+        self.goal_slowdown_distance = float(
+            navigation["goal_slowdown_distance_m"]
+        )
+        if not (
+            0.0 < self.minimum_approach_speed <= self.straight_speed
+            and self.goal_slowdown_distance > 0.0
+        ):
+            raise ValueError(
+                "straight speeds must satisfy 0 < minimum <= cruise and slowdown > 0"
+            )
         self.waypoint_spacing = float(navigation["waypoint_spacing_m"])
         self.waypoint_seconds_per_m = float(
             navigation["waypoint_budget_seconds_per_m"]
@@ -66,9 +93,9 @@ class NinoGazeboEnv(gym.Env):
         self.waypoint_slack = float(navigation["waypoint_slack_seconds"])
         self.ros = RosRobotInterface(
             world_name="long_hall",
-            subscribe_plan=True,
-            plan_topic=str(navigation.get("plan_topic", "/plan")),
-            nav_cmd_topic=str(navigation.get("nav_cmd_topic", "/cmd_vel_nav")),
+            subscribe_plan=False,
+            cmd_vel_topic=str(navigation.get("cmd_vel_topic", "/cmd_vel")),
+            imu_topic=str(config["policy_v2"].get("imu_topic", "/imu/data")),
         )
         self.ros.imu_includes_gravity = bool(config["policy_v2"]["imu_includes_gravity"])
         self.executor = MultiThreadedExecutor(num_threads=2)
@@ -101,8 +128,24 @@ class NinoGazeboEnv(gym.Env):
             1, ceil(float(config["navigation_invalid_hold_seconds"]) / self.control_dt)
         )
         self._randomization = {}
+        adaptive = config.get("adaptive_terrain", {})
+        self.adaptive_terrain_enabled = bool(adaptive.get("enabled", False))
+        self.adaptive_terrain_progress = bool(
+            adaptive.get("progress_on_success", True)
+        )
+        self.max_terrain_features = int(adaptive.get("max_features", 20))
+        self.terrain_features_per_success = int(
+            adaptive.get("add_per_success", 1)
+        )
+        self.terrain_feature_count = int(adaptive.get("initial_features", 0))
+        if (
+            self.max_terrain_features < 0
+            or self.terrain_features_per_success < 0
+            or not 0 <= self.terrain_feature_count <= self.max_terrain_features
+        ):
+            raise ValueError("adaptive terrain feature counts are invalid")
+        self.successful_episodes = 0
         self.path = self._make_curriculum_path()
-        self._episode_nav_path = None
         self.previous_action = BASELINE_ACTION.copy()
         self.action_before_previous = BASELINE_ACTION.copy()
         self.previous_tracking = None
@@ -149,50 +192,92 @@ class NinoGazeboEnv(gym.Env):
         return stage, stage / 5.0, float(self.goal_pose[0])
 
     def _make_curriculum_path(self) -> PathTracker:
-        _, _, goal_x = self._curriculum_stage()
         spacing = float(self.config["path"]["point_spacing_m"])
-        start_x, start_y, _ = self.start_pose
-        goal_y = float(self.goal_pose[1])
-        x_values = np.arange(start_x, goal_x + 0.5 * spacing, spacing)
-        if x_values[-1] < goal_x:
-            x_values = np.append(x_values, goal_x)
-        y_values = np.linspace(start_y, goal_y, len(x_values))
-        return PathTracker(zip(x_values, y_values))
+        start = np.asarray(self.start_pose[:2], dtype=np.float64)
+        goal = np.asarray(self.goal_pose[:2], dtype=np.float64)
+        distance = float(np.linalg.norm(goal - start))
+        if distance <= 0.0:
+            raise ValueError("navigation.goal_pose must differ from start_pose")
+        sample_count = max(2, int(np.ceil(distance / spacing)) + 1)
+        return PathTracker(np.linspace(start, goal, sample_count))
+
+    def _straight_command(self, endpoint_distance: float) -> float:
+        """Slow smoothly near the endpoint so the 1 cm goal is attainable."""
+        tolerance = float(self.config["goal_tolerance_m"])
+        remaining = max(0.0, float(endpoint_distance) - tolerance)
+        fraction = np.clip(
+            remaining / max(self.goal_slowdown_distance, tolerance), 0.0, 1.0
+        )
+        if remaining <= 0.0:
+            return 0.0
+        return float(max(self.minimum_approach_speed, self.straight_speed * fraction))
 
     def _curriculum_cables(self, stage: int) -> list[tuple[float, float, float]]:
-        """Six phases: flat, fixed, position, angle, diameter, multiple."""
+        """Return the single cable for a hard-to-easy size/angle phase.
+
+        Every phase contains a cable.  Position and cable count stay fixed so
+        that phase difficulty is controlled only by diameter and angle.
+        """
         terrain = self.config["terrain_curriculum"]
-        if stage <= 0:
+        phases = terrain["phases_hard_to_easy"]
+        if len(phases) != 6:
+            raise ValueError("terrain_curriculum.phases_hard_to_easy needs six phases")
+        diameters = [float(item["diameter_m"]) for item in phases]
+        angles = [float(item["angle_deg"]) for item in phases]
+        if diameters != sorted(diameters, reverse=True) or angles != sorted(
+            angles, reverse=True
+        ):
+            raise ValueError("Cable phases must be ordered hard-to-easy by size and angle")
+        phase = phases[int(np.clip(stage, 0, len(phases) - 1))]
+        diameter = float(phase["diameter_m"])
+        angle_magnitude = float(phase["angle_deg"])
+        if not np.isfinite(diameter) or diameter <= 0.0:
+            raise ValueError("Every curriculum phase needs a positive cable diameter")
+        if not np.isfinite(angle_magnitude) or not 0.0 <= angle_magnitude <= 90.0:
+            raise ValueError("Cable phase angle_deg must be in [0, 90]")
+        # Mirroring the angle prevents a left/right bias without changing the
+        # configured difficulty magnitude.  Zero remains exactly zero.
+        sign = float(self.np_random.choice((-1.0, 1.0))) if angle_magnitude else 1.0
+        return [(
+            float(terrain["cable_x_m"]),
+            0.5 * diameter,
+            float(np.deg2rad(sign * angle_magnitude)),
+        )]
+
+    def _adaptive_terrain_features(self) -> list[tuple[str, float, float, float]]:
+        """Return deterministic side features while preserving the center lane."""
+        if not self.adaptive_terrain_enabled:
             return []
-        x_low, x_high = (float(v) for v in terrain["cable_x_range_m"])
-        radius_low, radius_high = (
-            0.5 * float(v) for v in terrain["cable_diameter_range_m"]
-        )
-        fixed_x = float(terrain["fixed_cable_x_m"])
-        fixed_radius = 0.5 * float(terrain["fixed_cable_diameter_m"])
-        if stage == 1:
-            return [(fixed_x, fixed_radius, 0.0)]
-        x = float(self.np_random.uniform(x_low, x_high))
-        if stage == 2:
-            return [(x, fixed_radius, 0.0)]
-        max_angle = np.deg2rad(float(terrain["max_cable_angle_deg"]))
-        angle = float(self.np_random.uniform(-max_angle, max_angle))
-        if stage == 3:
-            return [(x, fixed_radius, angle)]
-        radius = float(self.np_random.uniform(radius_low, radius_high))
-        if stage == 4:
-            return [(x, radius, angle)]
-        count = int(self.np_random.integers(2, int(terrain["max_cables"]) + 1))
-        positions = np.linspace(x_low, x_high, count)
-        jitter = self.np_random.uniform(-0.5, 0.5, count)
-        return [
-            (
-                float(np.clip(position + offset, x_low, x_high)),
-                float(self.np_random.uniform(radius_low, radius_high)),
-                float(self.np_random.uniform(-max_angle, max_angle)),
+        config = self.config["adaptive_terrain"]
+        x_min, x_max = (float(value) for value in config["zone_x_m"])
+        clearance = float(config["path_clearance_m"])
+        max_lateral = float(config["max_lateral_center_m"])
+        if not x_min < x_max or not 0.0 < clearance < max_lateral < 1.80:
+            raise ValueError("adaptive terrain bounds must fit inside the hallway")
+        features = []
+        kinds = ("pothole", "obstacle", "cable")
+        for index in range(self.terrain_feature_count):
+            kind = kinds[index % len(kinds)]
+            size = (0.18 if kind == "pothole" else
+                    0.12 if kind == "obstacle" else 0.015)
+            # A low-discrepancy sequence spreads repeated successes through the
+            # cable zone instead of stacking objects at identical positions.
+            fraction = (index * 0.6180339887498949 + 0.17) % 1.0
+            x = x_min + fraction * (x_max - x_min)
+            side = -1.0 if index % 2 else 1.0
+            lateral_room = max_lateral - clearance - size - 0.08
+            y = side * (
+                clearance + size + 0.08
+                + max(0.0, lateral_room) * ((index * 0.37) % 1.0)
             )
-            for position, offset in zip(positions, jitter)
-        ]
+            features.append((kind, float(x), float(y), float(size)))
+        return features
+
+    def _past_goal_distance(self, state: RobotState) -> float:
+        """Signed distance beyond the endpoint plane along the final segment."""
+        direction = self.path.points[-1] - self.path.points[-2]
+        direction /= max(float(np.linalg.norm(direction)), 1.0e-9)
+        return float(np.dot(np.asarray([state.x, state.y]) - self.path.points[-1], direction))
 
     def _sample_randomization(self) -> None:
         cfg = self.config["domain_randomization"]
@@ -260,7 +345,7 @@ class NinoGazeboEnv(gym.Env):
             local_waypoint_distance=waypoint_distance,
             final_goal_distance=tracking.endpoint_distance,
             waypoint_time_remaining_fraction=float(time_fraction),
-            valid=self.ros.navigation_valid(self.nav_stale_seconds),
+            valid=self.ros.straight_reference_valid(self.nav_stale_seconds),
         )
 
     def _actor_observation(self, state, action, reference):
@@ -274,11 +359,12 @@ class NinoGazeboEnv(gym.Env):
             self.ros.imu_includes_gravity)
         return frame
 
-    def _sim_seconds(self):
-        return self.ros.get_clock().now().nanoseconds * 1e-9
-
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
+        # Episode setup requires a running clock.
+        if self.world_is_paused:
+            self.ros.set_world_paused(False)
+            self.world_is_paused = False
         self.attempt_number += 1
         self.episode_steps = 0
         self.wrong_direction_steps = 0
@@ -293,27 +379,23 @@ class NinoGazeboEnv(gym.Env):
         self._sample_randomization()
         stage, level, goal_x = self._curriculum_stage()
         self.ros.reset_episode(start_pose=self.start_pose)
-        self.ros.configure_training_cables(self._curriculum_cables(stage))
-        self.ros.initialize_navigation(
-            self.start_pose, self.goal_pose, timeout=self.nav_startup_timeout
-        )
+        episode_cables = self._curriculum_cables(stage)
+        self.ros.configure_training_cables(episode_cables)
+        episode_features = self._adaptive_terrain_features()
+        self.ros.configure_adaptive_terrain(episode_features)
+        self.ros.configure_goal_marker(self.goal_pose)
         self.ros.wait_for_sensors(self.sensor_timeout)
-        self.ros.wait_for_navigation(
-            self.nav_startup_timeout, stale_after=self.nav_stale_seconds
-        )
+        self.ros.publish_straight_command(0.0)
         self.ros.wait_for_v2_controller()
         if not self.ros.ground_truth_ready():
             raise RuntimeError("Training slip reward needs /ground_truth/odom; actor does not")
-        self._episode_nav_path = self.ros.nav_path()
-        nav_points = self.ros.nav_path_in_odom(self._episode_nav_path)
-        self.path = PathTracker(nav_points) if nav_points else self._make_curriculum_path()
+        self.path = self._make_curriculum_path()
         self.waypoint_targets = np.arange(
             self.waypoint_spacing, self.path.total_length, self.waypoint_spacing
         )
         self.next_waypoint_index = 0
         self.waypoint_arrival_times = []
         self.episode_started_at = monotonic()
-        self.episode_started_sim = self._sim_seconds()
         self.stall_window = StallWindow()
         self.vertical_square_integral = 0.0
         self.imu_coverage_seconds = 0.0
@@ -333,9 +415,27 @@ class NinoGazeboEnv(gym.Env):
         self.torque_square_sum = 0.0
         self.max_abs_torque = 0.0
         self.accel_square_sum = 0.0
+        # Pause before selecting the episode clock origin. DDS may still hold
+        # IMU messages generated during reset/navigation; using an earlier
+        # sample here makes the first requested interval fall out of the IMU
+        # window once that backlog is delivered.
+        self.ros.set_world_paused(True)
+        self.world_is_paused = True
+        # Establish time zero from fresh post-reset /clock and IMU messages.
+        # A one-physics-step flush here prevents callbacks from the previous
+        # epoch shifting every later reward window; it is not paid per action.
+        self.lockstep_sim_time = self.ros.begin_lockstep_epoch(
+            timeout=self.sensor_timeout
+        )
         truth = self.ros.snapshot()
-        frame, points = self._episode_nav_path or ("odom", self.path.points)
-        self.trajectory = EpisodeTrajectory(points, frame, truth.odom_stamp_s)
+        self.episode_started_sim = self.lockstep_sim_time
+        frame, points = "odom", self.path.points
+        self.trajectory = EpisodeTrajectory(
+            points, frame, truth.odom_stamp_s,
+            cable_x=episode_cables[0][0],
+            cable_radius=episode_cables[0][1],
+            cable_angle=episode_cables[0][2],
+        )
         self.trajectory.add(0.0, *self.ros.pose_in_frame(truth, frame))
         self.previous_robot_state = deepcopy(truth)
         _, self.previous_tracking = make_observation(
@@ -344,48 +444,89 @@ class NinoGazeboEnv(gym.Env):
         reference = self._reference(self.previous_tracking, 0.0)
         observation = self.history.reset(self._actor_observation(
             self._noisy_state(truth), self.previous_action, reference))
+        # From here on, only step() advances simulation. This prevents OS/GPU
+        # scheduling delays from stretching a nominal 0.1 s action into a much
+        # longer and incompletely sampled interval.
         return observation, {
             "attempt": self.attempt_number,
             "curriculum_stage": stage + 1,
             "curriculum_level": level,
             "goal_x_m": goal_x,
+            "cable_count": len(episode_cables),
+            "cable_diameter_m": 2.0 * episode_cables[0][1],
+            "cable_angle_deg": degrees(episode_cables[0][2]),
+            "adaptive_terrain_features": len(episode_features),
         }
 
     def step(self, action):
+        if not self.world_is_paused:
+            raise RuntimeError("Lockstep invariant violated: Gazebo must be paused")
         action = np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0)
         scale, torque = decode_action(action, self.action_scale)
-        started_sim = self._sim_seconds()
+        started_sim = self.lockstep_sim_time
+        self.ros.publish_straight_command(
+            self._straight_command(self.previous_tracking.endpoint_distance)
+        )
+        # Lidar is nominally 10 Hz, equal to the action rate, and Gazebo can
+        # place its sample just beyond an exact 100 ms multi-step boundary.
+        # Require it every second action; all faster state/control streams are
+        # still mandatory every action. At the 0.4 m/s speed limit this permits
+        # at most 8 cm travel, inside the 10 cm collision safety threshold.
+        sensor_names = ["odom", "ground_truth", "joint", "torque"]
+        if self.episode_steps % 2:
+            sensor_names.append("scan")
+        sensor_markers = self.ros.sensor_markers(sensor_names)
         reward_reference = self._reference(
             self.previous_tracking, started_sim - self.episode_started_sim)
         delay = min(self.control_dt * 0.8, self._randomization["delay"])
-        delay_deadline = monotonic() + self.config["policy_v2"]["simulation_step_wall_timeout_seconds"]
-        while self._sim_seconds() < started_sim + delay:
-            if monotonic() > delay_deadline:
-                self.ros.publish_control(0.0, 0.0, 0.0)
-                raise RuntimeError("Simulation clock paused during residual command delay")
-            sleep(0.002)
+        delay_steps = min(
+            self.physics_steps_per_control - 1,
+            int(round(delay / self.physics_dt)),
+        )
+        step_timeout = float(
+            self.config["policy_v2"]["simulation_step_wall_timeout_seconds"]
+        )
+        # A single long multi_step can outrun ROS/Gazebo sensor publishers.
+        # Two 50 ms bursts give odometry, lidar and applied-torque callbacks a
+        # scheduling boundary without returning to the old five-call cost.
+        max_chunk_steps = max(1, self.physics_steps_per_control // 2)
+
+        def advance_chunked(steps):
+            remaining = int(steps)
+            while remaining > 0:
+                chunk = min(max_chunk_steps, remaining)
+                self.ros.advance_world(chunk, timeout=step_timeout)
+                remaining -= chunk
+
+        if delay_steps:
+            advance_chunked(delay_steps)
         torque *= self._randomization["traction"]
         torque += self.np_random.normal(0.0, self._randomization["torque_noise"], size=2)
         torque = np.clip(torque, -self.action_scale, self.action_scale)
         if self.config.get("evaluation_baseline", False):
             torque[:] = 0.0
         self.ros.publish_control(scale, float(torque[0]), float(torque[1]))
-        deadline = monotonic() + self.config["policy_v2"]["simulation_step_wall_timeout_seconds"]
-        while self._sim_seconds() < started_sim + self.control_dt:
-            if monotonic() > deadline:
-                self.ros.publish_control(0.0, 0.0, 0.0)
-                raise RuntimeError("Simulation clock paused; aborting instead of generating fake steps")
-            sleep(0.002)
-        ended_sim = self._sim_seconds()
-        step_dt = ended_sim - started_sim
-        try:
+        advance_chunked(self.physics_steps_per_control - delay_steps)
+        target_sim = started_sim + self.control_dt
+        ended_sim = target_sim
+        self.lockstep_sim_time = ended_sim
+        step_dt = self.control_dt
+        if self.config["policy_v2"].get("imu_strict_coverage", False):
             imu = self.ros.wait_for_impact(started_sim, ended_sim,
                 self.config["reward_v2"]["impact_acceleration_sigma_m_s2"],
                 self.config["policy_v2"].get("imu_wait_timeout_seconds", 0.5),
-                self.config["policy_v2"].get("imu_min_coverage", 0.8))
-        except RuntimeError:
-            self.ros.publish_control(0.0, 0.0, 0.0)
-            raise
+                self.config["policy_v2"].get("imu_min_coverage", 0.8),
+                self.config["policy_v2"].get("imu_max_latest_lag_seconds", 0.05))
+        else:
+            imu = self.ros.estimate_impact(
+                started_sim,
+                ended_sim,
+                self.config["reward_v2"]["impact_acceleration_sigma_m_s2"],
+            )
+        self.ros.wait_for_sensor_updates(
+            sensor_markers,
+            self.config["policy_v2"].get("sensor_wait_timeout_seconds", 2.0),
+        )
         self.vertical_square_integral += imu["square_integral"]
         self.imu_coverage_seconds += imu["duration"]
         self.peak_vertical_acceleration = max(self.peak_vertical_acceleration, imu["peak"])
@@ -393,23 +534,13 @@ class NinoGazeboEnv(gym.Env):
         self.episode_steps += 1
         self.global_steps += 1
         elapsed = ended_sim - self.episode_started_sim
-        if not self.ros.ground_truth_ready():
+        if not self.ros.ground_truth_valid():
             self.ros.publish_control(0.0, 0.0, 0.0)
-            raise RuntimeError("Ground truth velocity stale; slip reward cannot be computed")
+            raise RuntimeError("Ground truth velocity is invalid; slip reward cannot be computed")
         truth = self.ros.snapshot()
-        if not self.ros.applied_torque_ready():
+        if not self.ros.applied_torque_valid():
             self.ros.publish_control(0.0, 0.0, 0.0)
-            raise RuntimeError("Applied torque feedback stale; effort reward cannot be computed")
-        # Keep waypoint identities fixed in the map, while applying AMCL's
-        # latest correction when comparing against wheel odometry. Freezing
-        # the initial map->odom transform produces false endpoint failures.
-        nav_points = self.ros.nav_path_in_odom(self._episode_nav_path)
-        if nav_points is not None:
-            self.path.set_points(nav_points)
-            _, self.previous_tracking = make_observation(
-                self.previous_robot_state, self.path, self.lookahead,
-                self.previous_action,
-            )
+            raise RuntimeError("Applied torque feedback is invalid; effort reward cannot be computed")
         _, tracking = make_observation(truth, self.path, self.lookahead, action)
         # Use the odometry message timestamp, not the end of an IMU wait.
         self.trajectory.add(truth.odom_stamp_s - self.trajectory.clock_origin_sim_s,
@@ -433,6 +564,12 @@ class NinoGazeboEnv(gym.Env):
 
         min_lidar = min(truth.lidar_ranges, default=truth.lidar_range_max)
         succeeded = goal_reached(tracking, truth, self.config)
+        past_goal_distance = self._past_goal_distance(truth)
+        goal_overshoot = (
+            not succeeded
+            and past_goal_distance
+            > float(self.config.get("goal_overshoot_tolerance_m", 0.0))
+        )
         rolled = max(abs(degrees(truth.roll)), abs(degrees(truth.pitch))) >= float(
             self.config["rollover_limit_deg"]
         )
@@ -457,12 +594,10 @@ class NinoGazeboEnv(gym.Env):
             self.wrong_direction_steps = 0
         self.wrong_direction_seconds = self.wrong_direction_seconds + step_dt if wrong_direction_sample else 0.0
         wrong_direction = self.wrong_direction_seconds >= float(self.config["wrong_direction_hold_seconds"])
-        # Infrastructure failures are not a learned collision penalty.
-        if navigation_invalid:
-            self.ros.publish_control(0.0, 0.0, 0.0)
-            raise RuntimeError("Nav2 reference stale for too long; aborting this training run")
-        failed = ("rollover" if rolled else "collision" if collision else
-                  "off_path" if off_path else "wrong_direction" if wrong_direction else None)
+        failed = ("goal_overshoot" if goal_overshoot else
+                  "rollover" if rolled else "collision" if collision else
+                  "off_path" if off_path else "wrong_direction" if wrong_direction else
+                  "navigation_invalid" if navigation_invalid else None)
         succeeded = bool(succeeded and not failed)
         timed_out = elapsed >= float(self.config["max_episode_seconds"])
         terminated = bool(
@@ -472,6 +607,7 @@ class NinoGazeboEnv(gym.Env):
             or off_path
             or navigation_invalid
             or collision
+            or goal_overshoot
             or timed_out
         )
         # The configured mission deadline is a task failure, not an external
@@ -543,8 +679,17 @@ class NinoGazeboEnv(gym.Env):
             **metrics_dict(tracking, truth, elapsed, succeeded),
         }
         if terminated or truncated:
+            episode_feature_count = self.terrain_feature_count
+            if succeeded:
+                self.successful_episodes += 1
+                if self.adaptive_terrain_progress:
+                    self.terrain_feature_count = min(
+                        self.max_terrain_features,
+                        self.terrain_feature_count + self.terrain_features_per_success,
+                    )
             reason = (
         "success" if succeeded
+        else "goal_overshoot" if goal_overshoot
         else "rollover" if rolled
         else "wrong_direction" if wrong_direction
         else "off_path" if off_path
@@ -558,7 +703,7 @@ class NinoGazeboEnv(gym.Env):
         f"heading_err={degrees(tracking.heading_error):.1f}deg | "
         f"lateral={tracking.lateral_error:.2f}m | "
         f"v={truth.linear_velocity:.2f}m/s | "
-        f"nav_valid={reference.valid} | "
+        f"reference_valid={reference.valid} | "
         f"lidar_min={min_lidar:.2f}m | "
         f"roll={degrees(truth.roll):.1f}deg | "
         f"pitch={degrees(truth.pitch):.1f}deg"
@@ -567,11 +712,18 @@ class NinoGazeboEnv(gym.Env):
             info["episode_metrics"] = {
                 **self.trajectory.metrics(),
                 "trajectory_frame": self.trajectory.frame_id,
-                "trajectory_pose_source": "wheel_odom_transformed_by_localization",
+                "trajectory_pose_source": "wheel_odometry",
                 **metrics_dict(tracking, truth, elapsed, succeeded),
                 "attempt": self.attempt_number,
                 "episode_start_time_unix": self.episode_start_time_unix,
                 "final_arrival_time_seconds": elapsed if succeeded else None,
+                "goal_reached": succeeded,
+                "past_goal_distance_m": past_goal_distance,
+                "adaptive_terrain_features": episode_feature_count,
+                "next_adaptive_terrain_features": self.terrain_feature_count,
+                "successful_episodes": self.successful_episodes,
+                "final_lateral_drift_m": float(tracking.lateral_error),
+                "final_abs_lateral_drift_m": abs(float(tracking.lateral_error)),
                 "return": self.episode_return,
                 "peak_vertical_acceleration_m_s2": self.peak_vertical_acceleration,
                 "rms_vertical_acceleration_m_s2": float(np.sqrt(
@@ -617,19 +769,21 @@ class NinoGazeboEnv(gym.Env):
                     self.wrong_direction_seconds
                 ),
                 "termination": (
-                    "success" if succeeded else "rollover" if rolled else "wrong_direction" if wrong_direction else "off_path" if off_path else "navigation_invalid" if navigation_invalid else "collision" if collision else "timeout"
+                    "success" if succeeded else "goal_overshoot" if goal_overshoot else "rollover" if rolled else "wrong_direction" if wrong_direction else "off_path" if off_path else "navigation_invalid" if navigation_invalid else "collision" if collision else "timeout"
                 ),
             }
             self.ros.publish_control(0.0, 0.0, 0.0)
+            self.ros.publish_straight_command(0.0)
         return observation, reward, terminated, truncated, info
 
     def close(self) -> None:
         try:
             self.ros.publish_control(0.0, 0.0, 0.0)
-            if self.world_paused_for_update:
+            self.ros.publish_straight_command(0.0)
+            if self.world_is_paused or self.world_paused_for_update:
                 self.ros.set_world_paused(False)
+                self.world_is_paused = False
                 self.world_paused_for_update = False
-            self.ros.cancel_navigation_goal()
             sleep(0.05)
             self.executor_stop.set()
             self.executor_thread.join(timeout=2.0)

@@ -61,7 +61,7 @@ def run(baseline=False):
     parser.add_argument("--phase", type=int, choices=range(1, 7), default=1)
     parser.add_argument("--seed", type=int, default=10000)
     parser.add_argument("--randomized", action="store_true",
-                        help="Full-strength perturbations even in phase 1")
+                        help="Enable full-strength residual/sensor perturbations")
     parser.add_argument("--output", type=Path, default=Path("rl_runs/baseline" if baseline else "rl_runs/evaluation"))
     args = parser.parse_args()
     if args.episodes < 1:
@@ -71,6 +71,10 @@ def run(baseline=False):
     config["domain_randomization"]["enabled"] = args.randomized
     config["domain_randomization"]["phase_scales"] = [1.0] * 6
     config["evaluation_baseline"] = baseline
+    adaptive = config.get("adaptive_terrain", {})
+    if adaptive.get("enabled", False):
+        adaptive["progress_on_success"] = False
+        adaptive["initial_features"] = int(adaptive.get("evaluation_features", 20))
     model = None
     if not baseline:
         import torch
@@ -85,13 +89,14 @@ def run(baseline=False):
     import yaml
     (output / "config.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
     metadata = {
-        "schema_version": 1, "controller": "nav2_baseline" if baseline else "ppo",
+        "schema_version": 1, "controller": "straight_pi_baseline" if baseline else "ppo",
         "model": str(args.model.resolve()) if not baseline else None,
         "phase": args.phase, "seed": args.seed, "randomized": args.randomized,
         "benchmark_id": benchmark_id(config),
-        "pose_source": "wheel_odom_transformed_by_localization",
+        "pose_source": "wheel_odometry",
         "metric_weighting": "simulation_time_trapezoid",
-        "reference": "frozen initial Nav2 plan, coordinates in its frame",
+        "reference": "fixed straight line from configured start_pose to goal_pose in odom",
+        "per_episode_plot": "trajectory.png; raw samples are in trajectory.csv",
     }
     (output / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
     # Create ROS only after validating the model/config.
@@ -108,14 +113,22 @@ def run(baseline=False):
                     break
             row = dict(info["episode_metrics"])
             row.update(episode=episode + 1, seed=args.seed + episode,
-                       controller=metadata["controller"], phase=args.phase)
+                       controller=metadata["controller"], phase=args.phase,
+                       cable_count=reset_info["cable_count"],
+                       cable_diameter_m=reset_info["cable_diameter_m"],
+                       cable_angle_deg=reset_info["cable_angle_deg"])
             rows.append(row)
             env.trajectory.save(output / f"episode-{episode+1:03d}")
             # Persist each completed episode, so a later transport failure does
             # not lose previous measurements. No success row for a broken run.
             write_csv(output / "episodes.csv", rows)
-            print(f"{episode+1}: {row['termination']}; path RMSE={row['path_rmse_m']:.3f}m, "
-                  f"P95={row['path_p95_m']:.3f}m, completion={row['final_progress_fraction']:.1%}")
+            print(
+                f"{episode+1}: reached={row['goal_reached']}; "
+                f"time={row['time_seconds']:.2f}s, "
+                f"endpoint={row['endpoint_distance_m']:.3f}m, "
+                f"lateral drift={row['final_abs_lateral_drift_m']:.3f}m, "
+                f"path RMSE={row['path_rmse_m']:.3f}m"
+            )
     finally:
         env.close()
         if rows:
@@ -143,7 +156,7 @@ def compare_summaries(baseline, candidate):
         result["metrics"][name] = {"baseline": b, "candidate": c, "delta": c-b}
     result["interpretation"] = (
         "Compare success first, then errors and comfort. Early failure can lower RMSE/time. "
-        "Seeds match terrain draws, not asynchronous Nav2/Gazebo execution. "
+        "Seeds match terrain draws; ROS/Gazebo transport is still asynchronous. "
         "No statistical significance or physical ground-truth accuracy is claimed.")
     return result
 

@@ -1,13 +1,13 @@
 """Closed-loop /cmd_vel to wheel-torque adapter for JointGroupEffortController.
 
 Control architecture:
-    Nav2 /cmd_vel
+    direct straight-line /cmd_vel
         -> PI wheel-speed controller
         -> baseline wheel torque
         + RL residual torque from /wheel_torque_commands
         -> /wheel_effort_controller/commands
 
-The RL command is a residual correction. It does not override or clear Nav2.
+The RL command is a residual correction. It does not override the baseline.
 """
 
 from math import cos, isfinite, sin
@@ -50,7 +50,7 @@ class EffortDrive(Node):
         self.declare_parameter("max_wheel_acceleration", 12.0)
         self.declare_parameter("max_wheel_torque", 12.0)
 
-        # Maximum torque produced by the Nav2 velocity PI controller.
+        # Maximum torque produced by the baseline velocity PI controller.
         self.declare_parameter("max_velocity_control_torque", 2.0)
 
         self.declare_parameter("max_effort_rate", 10.0)
@@ -61,7 +61,7 @@ class EffortDrive(Node):
         self.declare_parameter("command_timeout", 0.5)
         self.declare_parameter("torque_command_timeout", 0.25)
 
-        self.declare_parameter("control_rate", 1000.0)
+        self.declare_parameter("control_rate", 500.0)
         self.declare_parameter("odom_publish_rate", 50.0)
         self.declare_parameter("torque_status_publish_rate", 50.0)
 
@@ -71,7 +71,7 @@ class EffortDrive(Node):
         self.declare_parameter("publish_odom_tf", True)
 
         # Training mode should set both to True:
-        #   accept_cmd_vel=True  -> Nav2 supplies the baseline motion
+        #   accept_cmd_vel=True  -> /cmd_vel supplies the baseline motion
         #   accept_torque=True   -> RL supplies residual torque
         self.declare_parameter("accept_cmd_vel", True)
         self.declare_parameter("accept_torque", True)
@@ -321,7 +321,7 @@ class EffortDrive(Node):
         return response
 
     def _cmd_vel_callback(self, message: Twist) -> None:
-        """Receive the Nav2 velocity command used by the baseline controller."""
+        """Receive the velocity command used by the baseline controller."""
         if not self.accept_cmd_vel:
             return
 
@@ -345,8 +345,8 @@ class EffortDrive(Node):
         """Receive RL residual torque [left_Nm, right_Nm].
 
         IMPORTANT:
-        This callback does NOT clear the Nav2 command.
-        The torque is added to the Nav2 PI baseline in _control_update().
+        This callback does not clear the baseline velocity command.
+        The torque is added to the velocity PI baseline in _control_update().
         """
         if not self.accept_torque or self.v2_active:
             return
@@ -379,7 +379,7 @@ class EffortDrive(Node):
         self.last_torque_ns = self.get_clock().now().nanoseconds
 
         # Do NOT reset last_cmd_ns here.
-        # RL is residual; Nav2 must keep controlling the baseline motion.
+        # RL is residual; the velocity PI must keep controlling baseline motion.
 
     def _control_v2_callback(self, message):
         if not self.accept_torque:
@@ -421,7 +421,7 @@ class EffortDrive(Node):
         self.have_wheel_state = True
 
     def _control_update(self) -> None:
-        """Run baseline Nav2 PI control and add fresh RL residual torque."""
+        """Run baseline velocity PI control and add fresh RL residual torque."""
         now = self.get_clock().now()
         now_ns = now.nanoseconds
 

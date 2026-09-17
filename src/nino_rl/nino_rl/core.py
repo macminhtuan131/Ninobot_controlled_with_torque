@@ -183,7 +183,7 @@ class TrackingState:
 
 @dataclass
 class NavReference:
-    """Fresh Nav2 reference values attached to one policy observation."""
+    """Fresh baseline velocity reference attached to one policy observation."""
 
     desired_linear_velocity: float = 0.0
     desired_angular_velocity: float = 0.0

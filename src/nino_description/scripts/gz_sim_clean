@@ -2,6 +2,7 @@
 """Run Gazebo Sim and turn an intentional launch interrupt into a clean exit."""
 
 import os
+import ctypes
 import signal
 import subprocess
 import sys
@@ -9,6 +10,47 @@ import sys
 
 child = None
 shutdown_requested = False
+
+
+def terminate_with_parent() -> None:
+    """Ask Linux to terminate Gazebo if its launch wrapper disappears."""
+    libc = ctypes.CDLL(None)
+    pr_set_pdeathsig = 1
+    if libc.prctl(pr_set_pdeathsig, signal.SIGTERM) != 0:
+        raise OSError("prctl(PR_SET_PDEATHSIG) failed")
+    # Close the small race where the parent exits before prctl is installed.
+    if os.getppid() == 1:
+        os.kill(os.getpid(), signal.SIGTERM)
+
+
+def existing_gazebo(arguments: list[str]) -> int | None:
+    """Find an existing server for the exact world passed to this wrapper."""
+    world_arguments = [os.path.abspath(arg) for arg in arguments if arg.endswith(".sdf")]
+    worlds = set(world_arguments)
+    worlds.update(os.path.realpath(world) for world in world_arguments)
+    if not worlds:
+        return None
+    own_pid = os.getpid()
+    for entry in os.scandir("/proc"):
+        if not entry.name.isdigit() or int(entry.name) == own_pid:
+            continue
+        try:
+            with open(f"/proc/{entry.name}/cmdline", "rb") as command_file:
+                raw = command_file.read()
+        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            continue
+        # The Ruby `gz` launcher rewrites its Linux process title, sometimes
+        # collapsing the whole visible command into argv[0]. Check that form
+        # as well as a conventional NUL-separated argv.
+        visible = raw.replace(b"\0", b" ").decode(errors="replace")
+        if "gz sim " in visible and any(world in visible for world in worlds):
+            return int(entry.name)
+        command = [part.decode(errors="replace") for part in raw.split(b"\0") if part]
+        if len(command) >= 2 and command[0].endswith("gz") and command[1] == "sim":
+            resolved = {os.path.realpath(part) for part in command if part.endswith(".sdf")}
+            if resolved.intersection(worlds):
+                return int(entry.name)
+    return None
 
 
 def request_shutdown(_signum=None, _frame=None) -> None:
@@ -67,11 +109,21 @@ def main() -> int:
 
     # Empty arguments can come from conditional launch substitutions.
     gazebo_arguments = [argument for argument in sys.argv[1:] if argument]
+    duplicate = existing_gazebo(gazebo_arguments)
+    if duplicate is not None:
+        print(
+            f"Refusing to start a duplicate Gazebo world (existing PID {duplicate}). "
+            "Stop the existing training_sim launch first.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 2
     if shutdown_requested:
         return 0
     child = subprocess.Popen(
         ["gz", "sim", *gazebo_arguments],
         start_new_session=True,
+        preexec_fn=terminate_with_parent,
     )
     # A signal can arrive between Popen starting Gazebo and assigning child.
     # Handle it here after assignment, so a launch exception cannot leave an

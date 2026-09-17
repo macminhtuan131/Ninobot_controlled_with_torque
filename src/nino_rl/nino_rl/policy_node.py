@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from math import ceil, cos, sin
+from math import ceil
 from pathlib import Path
 import sys
 from time import monotonic
@@ -11,8 +11,6 @@ from time import monotonic
 from ament_index_python.packages import get_package_share_directory
 import numpy as np
 import rclpy
-from rclpy.time import Time
-from tf2_ros import TransformException
 
 from nino_rl.core import (
     NavReference,
@@ -20,7 +18,6 @@ from nino_rl.core import (
     goal_reached,
     is_wrong_direction,
     load_config,
-    quaternion_to_euler,
 )
 from nino_rl.ros_interface import RosRobotInterface
 from nino_rl.control_v2 import (
@@ -35,7 +32,6 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--model", required=True, type=Path)
     parser.add_argument("--config", type=Path, default=share / "config" / "ppo.yaml")
     parser.add_argument("--path", type=Path, default=share / "config" / "path.yaml")
-    parser.add_argument("--plan-topic", default="/plan")
     parser.add_argument("--use-sim-time", action="store_true")
     parser.add_argument("--device", default=None, help="cuda, cpu, or auto")
     return parser.parse_args(sys.argv[1:])
@@ -45,11 +41,10 @@ class PolicyNode(RosRobotInterface):
     def __init__(self, args: argparse.Namespace) -> None:
         self.config = load_config(args.config)
         super().__init__(
-            subscribe_plan=True,
+            subscribe_plan=False,
             use_sim_time=args.use_sim_time,
             node_name="nino_rl_policy",
-            plan_topic=args.plan_topic,
-            nav_cmd_topic=str(self.config["navigation"].get("nav_cmd_topic", "/cmd_vel_nav")),
+            cmd_vel_topic=str(self.config["navigation"].get("cmd_vel_topic", "/cmd_vel")),
         )
         self.imu_includes_gravity = bool(self.config["policy_v2"]["imu_includes_gravity"])
         self.history = ObservationHistory(self.config["policy_v2"]["history_frames"])
@@ -61,8 +56,6 @@ class PolicyNode(RosRobotInterface):
         path_config = load_config(args.path)
         self.path = PathTracker(path_config["waypoints"])
         self.path_source = "YAML"
-        self.last_nav_signature = None
-        self.last_tf_warning = 0.0
         self.path_started_at = None
         self.deadline_reported = False
         self.wrong_direction_reported = False
@@ -75,7 +68,13 @@ class PolicyNode(RosRobotInterface):
             ),
         )
         self.previous_action = BASELINE_ACTION.copy()
-        self.frozen_nav_path = None
+        self.straight_speed = float(self.config["navigation"]["straight_speed_m_s"])
+        self.minimum_approach_speed = float(
+            self.config["navigation"].get("minimum_approach_speed_m_s", 0.03)
+        )
+        self.goal_slowdown_distance = float(
+            self.config["navigation"]["goal_slowdown_distance_m"]
+        )
         self.action_scale = float(self.config["max_wheel_torque_nm"])
         self.lookahead = list(self.config["path"]["lookahead_m"])
         self.collision_distance = float(self.config["lidar_collision_m"])
@@ -86,77 +85,15 @@ class PolicyNode(RosRobotInterface):
         validate_model(self.model, self.history.size)
         self.timer = self.create_timer(1.0 / float(self.config["control_hz"]), self._control)
         self.get_logger().info(
-            f"PPO policy loaded on {self.model.device}; waiting for sensors and {args.plan_topic}"
+            f"PPO policy loaded on {self.model.device}; fixed straight path, Nav2 disabled"
         )
-
-    def _path_in_odom(self, frame: str, points: list[tuple[float, float]]):
-        if frame == "odom":
-            return points
-        transform = self.tf_buffer.lookup_transform("odom", frame, Time())
-        translation = transform.transform.translation
-        rotation = transform.transform.rotation
-        _, _, yaw = quaternion_to_euler(rotation.x, rotation.y, rotation.z, rotation.w)
-        c, s = cos(yaw), sin(yaw)
-        return [
-            (
-                translation.x + c * x - s * y,
-                translation.y + s * x + c * y,
-            )
-            for x, y in points
-        ]
-
-    def _update_nav_path(self) -> None:
-        nav_path = self.nav_path()
-        if nav_path is None:
-            return
-        frame, points = nav_path
-        signature = (frame, len(points), hash(np.asarray(points, dtype=np.float64).tobytes()))
-        if signature == self.last_nav_signature:
-            return
-        try:
-            transformed = self._path_in_odom(frame, points)
-        except TransformException as error:
-            now = monotonic()
-            if now - self.last_tf_warning >= 2.0:
-                self.get_logger().warning(
-                    f"Chưa đổi được /plan từ {frame} sang odom: {error}"
-                )
-                self.last_tf_warning = now
-            return
-        previous_goal = self.path.points[-1].copy()
-        self.last_nav_signature = signature
-        self.path_source = f"Nav2 ({frame}->odom)"
-        goal_changed = np.linalg.norm(np.asarray(transformed[-1]) - previous_goal) > float(
-            self.config["goal_tolerance_m"]
-        )
-        if self.path_started_at is None or goal_changed:
-            self.frozen_nav_path = nav_path
-            self.path_started_at = self.get_clock().now().nanoseconds * 1e-9
-            self.deadline_reported = False
-            self.wrong_direction_reported = False
-            self.wrong_direction_steps = 0
-            self.history.values.clear()
-            self.previous_action = BASELINE_ACTION.copy()
-        # Keep waypoint identity fixed, as training does, but refresh TF.
-        if self.frozen_nav_path is not None:
-            frozen_frame, frozen_points = self.frozen_nav_path
-            self.path.set_points(self._path_in_odom(frozen_frame, frozen_points))
-        self.get_logger().info(f"Using {len(points)} waypoints from {self.path_source}")
 
     def _control(self) -> None:
         if not self.sensors_ready():
             self._stop_policy()
             return
-        self._update_nav_path()
         if self.path_started_at is None:
-            self._stop_policy()
-            return
-        if self.frozen_nav_path is not None:
-            try:
-                self.path.set_points(self._path_in_odom(*self.frozen_nav_path))
-            except TransformException:
-                self._stop_policy()
-                return
+            self.path_started_at = self.get_clock().now().nanoseconds * 1e-9
         state = self.snapshot()
         finite_ranges = [value for value in state.lidar_ranges if np.isfinite(value)]
         if finite_ranges and min(finite_ranges) <= self.collision_distance:
@@ -165,6 +102,23 @@ class PolicyNode(RosRobotInterface):
         _, tracking = make_observation(
             state, self.path, self.lookahead, self.previous_action
         )
+        remaining = max(
+            0.0, tracking.endpoint_distance - float(self.config["goal_tolerance_m"])
+        )
+        speed = 0.0 if remaining <= 0.0 else max(
+            self.minimum_approach_speed,
+            self.straight_speed * float(
+                np.clip(
+                    remaining / max(
+                        self.goal_slowdown_distance,
+                        float(self.config["goal_tolerance_m"]),
+                    ),
+                    0.0,
+                    1.0,
+                )
+            ),
+        )
+        self.publish_straight_command(speed)
         elapsed = self.get_clock().now().nanoseconds * 1e-9 - self.path_started_at
         desired_linear, desired_angular = self.desired_twist()
         # Match the environment's 5m waypoint reference/budget convention.
@@ -190,7 +144,7 @@ class PolicyNode(RosRobotInterface):
                     1.0,
                 )
             ),
-            valid=self.navigation_valid(
+            valid=self.straight_reference_valid(
                 float(self.config["navigation"]["stale_seconds"])
             ),
         )
@@ -255,6 +209,7 @@ class PolicyNode(RosRobotInterface):
 
     def _stop_policy(self):
         self.publish_control(0.0, 0.0, 0.0)
+        self.publish_straight_command(0.0)
         self.previous_action = STOP_ACTION.copy()
         self.history.values.clear()
 

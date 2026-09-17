@@ -28,7 +28,8 @@ are not treated as results for Nino.
 ## Policy: actual implementation
 
 PPO runs at a nominal **10 Hz**. The underlying effort-drive loop is configured
-at **1000 Hz**. Controller limits and watchdogs remain in `nino_control`.
+at **500 Hz**, matching the 2 ms training-world physics step. Controller limits
+and watchdogs remain in `nino_control`.
 
 Each frame has 60 values. Five frames, oldest to newest, give a 300-dimensional
 observation. Frames include nine robot-relative path lookaheads, heading sine
@@ -139,15 +140,19 @@ abort the run rather than becoming learned collision penalties.
 
 ## Timing and robustness changes
 
-- The IMU subscription now buffers 100 samples instead of one. Impact scoring
-  waits up to 0.5 wall seconds for the fixed simulation interval to be covered
-  (default ≥80%) and for its timestamp watermark to reach the interval end.
-  It still aborts on real missing coverage. It does not turn a stale held value
-  into a current measurement. IMU periods/gaps retain the existing 0.1 s hold cap.
-- Residual command delay is measured with `/clock`, not wall-clock sleep. A
-  bounded wall timeout catches a paused simulator. Commands, state snapshots and
-  TF still travel asynchronously: this is not deterministic lockstep simulation.
-- Training perturbation strength increases 0%,20%,40%,60%,80%,100% across phases.
+- The IMU subscription buffers 100 samples instead of one. Each policy action
+  advances Gazebo by exactly 100 one-ms physics steps while the world otherwise
+  remains paused. Impact scoring requires at least 80% interval coverage and a
+  bounded endpoint lag; a post-step barrier also requires fresh odometry,
+  ground-truth velocity, joints, laser, and applied-torque feedback. Real missing
+  coverage still aborts. IMU periods/gaps retain the 0.1 s hold cap.
+- Residual command delay is expressed in physics steps, not wall-clock sleep.
+  Bounded wall timeouts catch failed Gazebo steps or missing ROS feedback.
+  Physics advancement is lockstep; ROS transport and Nav2 remain asynchronous
+  and are synchronized at the post-step barrier.
+- Domain randomization is disabled by default so cable phase difficulty depends
+  only on diameter and angle. When explicitly enabled, its optional strength
+  decreases with the requested hard-to-easy phase order.
   `traction_scale`, `motor_delay_ms` and `torque_noise_std_nm` are historical
   config names for **residual-channel gain, command delay and additive noise**.
   They do not randomize SDF friction, mass, CoM or the whole motor plant.
@@ -156,7 +161,7 @@ abort the run rather than becoming learned collision penalties.
 - Randomized evaluation uses full strength. Baseline always has zero residual
   torque. Both evaluators consume the same random draws and use the same
   metrics pipeline, with no competing simultaneous process.
-- Training contract revision 4 includes task, observation and randomization
+- Training contract revision 8 includes task, observation and randomization
   settings, while permitting phase changes, seed/device changes and terrain
   curriculum adjustments. Incompatible resumes fail instead of silently
   changing the learning objective. Run metadata records software and GPU.

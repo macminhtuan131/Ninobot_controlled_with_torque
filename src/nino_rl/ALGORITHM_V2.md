@@ -38,8 +38,9 @@ section are retained for historical regression tests only; training calls
   coverage, paused simulation clocks and stale Nav2/ground-truth streams abort
   training instead of silently generating fabricated rewards. This does not
   guarantee capture of impacts faster than the sensor bandwidth.
-- PPO pauses Gazebo during optimizer updates, then resumes at the next rollout;
-  optimizer wall time therefore does not consume the episode time budget.
+- Gazebo remains paused between actions. Each action advances exactly 100 one-ms
+  physics steps, then waits for fresh post-step sensor and torque feedback.
+  Optimizer wall time therefore does not consume the episode time budget.
 - Episode TensorBoard scalars use means over episodes at each logging interval,
   rather than overwriting each other with only the final episode's value.
 
@@ -152,10 +153,12 @@ friction/mass randomizer. Use different seeds for final reporting than tuning.
 
 Manual curriculum gate: consider advancing only after >=90% held-out success
 and acceptable path/impact metrics on the current phase. No automatic claim of
-optimality is made. Phase 1 flat; 2 fixed small cable; 3 random position; 4 random
-angle; 5 random diameter; 6 multiple cables. These reuse the actual cable world;
-no ramp generator was added. Resume a v2 model with `--phase 2`, etc.; `--timesteps`
-is ADDITIONAL steps when resuming.
+optimality is made. All phases contain one cable at the same position. In the
+requested hard-to-easy order, phase 1 is 44 mm at 45 degrees and phases 2–6 are
+38/36, 32/27, 26/18, 20/9, and 12/0 (diameter in mm / absolute angle in degrees).
+The angle sign is randomized. Resume a v2 model with `--phase 2`, etc.;
+`--timesteps` is ADDITIONAL steps when resuming. Each evaluation episode also
+writes `trajectory.png`, overlaying the expected and robot trajectories.
 
 ## Validation
 

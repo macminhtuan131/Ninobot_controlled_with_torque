@@ -26,7 +26,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--checkpoint-every", type=int, default=25_000)
     parser.add_argument("--check-env", action="store_true")
     parser.add_argument("--phase", type=int, choices=range(1, 7),
-                        help="Fixed terrain phase; advance after held-out evaluation")
+                        help="Fixed hard-to-easy cable phase (1=hardest, 6=easiest)")
     parser.add_argument("--device", choices=("cpu", "cuda", "auto"))
     parser.add_argument("--preflight-timeout", type=float, default=30.0)
     return parser.parse_args(sys.argv[1:])
@@ -61,11 +61,21 @@ def main() -> None:
             "Cấu hình yêu cầu CUDA nhưng torch.cuda.is_available() = False. "
             "Chạy `ros2 run nino_rl check_cuda` để chẩn đoán."
         )
+    if device.startswith("cuda"):
+        try:
+            # Fail before starting ROS/Gazebo if the installed wheel and NVIDIA
+            # driver cannot actually execute a CUDA kernel.
+            probe = th.ones((32, 32), device=device)
+            _ = probe @ probe
+            th.cuda.synchronize()
+        except (RuntimeError, AssertionError) as error:
+            raise SystemExit(f"CUDA was detected but a CUDA operation failed: {error}") from error
+        print(f"CUDA ready: {th.cuda.get_device_name(th.cuda.current_device())}")
 
     from nino_rl.ros_env import NinoGazeboEnv
     from nino_rl.preflight import run_preflight
 
-    print("Running mandatory 12-point Nav2/RL preflight...")
+    print("Running mandatory 12-point straight-line RL preflight...")
     try:
         preflight_results = run_preflight(config, args.preflight_timeout)
     except (RuntimeError, TimeoutError) as error:
@@ -82,9 +92,6 @@ def main() -> None:
 
         def _on_rollout_start(self) -> None:
             self.reward_terms.clear()
-            if env.world_paused_for_update:
-                env.ros.set_world_paused(False)
-                env.world_paused_for_update = False
 
         def _on_step(self) -> bool:
             for info in self.locals.get("infos", []):
@@ -95,6 +102,10 @@ def main() -> None:
                     self.logger.record_mean(
                         "episode/wrong_direction_failure",
                         float(metrics["termination"] == "wrong_direction"),
+                    )
+                    self.logger.record_mean(
+                        "episode/goal_overshoot_failure",
+                        float(metrics["termination"] == "goal_overshoot"),
                     )
                     for name in (
                         "success",
@@ -114,6 +125,8 @@ def main() -> None:
                         "mean_imu_angular_xy_rad_s",
                         "peak_vertical_acceleration_m_s2",
                         "rms_vertical_acceleration_m_s2",
+                        "adaptive_terrain_features",
+                        "next_adaptive_terrain_features",
                     ):
                         self.logger.record_mean(f"episode/{name}", float(metrics[name]))
             return True
@@ -121,9 +134,8 @@ def main() -> None:
         def _on_rollout_end(self) -> None:
             # Do not leave the policy driving during an arbitrarily long PPO update.
             env.ros.publish_control(0.0, 0.0, 0.0)
-            # Optimizer wall time must not consume episode simulation time.
-            env.ros.set_world_paused(True)
-            env.world_paused_for_update = True
+            # The lockstep environment is already paused between every action,
+            # so optimizer wall time cannot consume episode simulation time.
             for name, values in self.reward_terms.items():
                 if values:
                     self.logger.record(f"reward_terms/{name}", float(np.mean(values)))
@@ -203,7 +215,13 @@ def main() -> None:
         final_path = run_dir / "nino_ppo_final"
         model.save(final_path)
         print(f"Đã lưu policy: {final_path}.zip")
-    except (KeyboardInterrupt, RuntimeError):
+    except KeyboardInterrupt:
+        if "model" in locals():
+            interrupted = run_dir / "nino_ppo_interrupted"
+            model.save(interrupted)
+            print(f"Saved {interrupted}.zip; unfinished rollout is discarded on resume.")
+        print("Training interrupted cleanly; robot stopped and simulator released.")
+    except RuntimeError:
         if "model" in locals():
             interrupted = run_dir / "nino_ppo_interrupted"
             model.save(interrupted)

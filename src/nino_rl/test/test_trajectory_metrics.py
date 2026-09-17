@@ -12,7 +12,7 @@ from nino_rl.trajectory_metrics import (
     EpisodeTrajectory, path_metrics, timed_metrics, read_track, time_weights, write_csv,
 )
 from nino_rl.evaluation import benchmark_id, compare_summaries, summarize, METRICS
-from nino_rl.timing import wait_for_coverage
+from nino_rl.timing import wait_for_coverage, wait_for_quiescent_timestamp
 
 
 def test_constant_offset_and_endpoint_overshoot():
@@ -77,6 +77,8 @@ def test_export_roundtrip_cli_and_frame_rejection(tmp_path):
     trace.add(0, 0, .1, 0)
     trace.add(.1, 1, .1, 0)
     trace.save(tmp_path)
+    assert (tmp_path / 'trajectory.png').stat().st_size > 0
+    assert (tmp_path / 'trajectory.csv').stat().st_size > 0
     actual = read_track(tmp_path / 'actual.csv')
     assert actual['frame'] == 'map'
     output = tmp_path / 'result.json'
@@ -100,12 +102,51 @@ def test_late_imu_arrives_before_timeout_but_real_gap_fails():
                     latest_stamp=.1 if clock[0] > .02 else .02)
     result = wait_for_coverage(measure, 0, .1, now=lambda: clock[0], pause=pause)
     assert result['duration'] == .1
+    # A 50 Hz sensor can naturally be one sample behind an arbitrary endpoint.
+    result = wait_for_coverage(
+        lambda: dict(duration=.1, latest_stamp=.087), 0, .1,
+        now=lambda: clock[0], pause=pause,
+    )
+    assert result['latest_stamp'] == .087
+    # Gazebo lockstep may expose one held sample for the full 100 ms action.
+    result = wait_for_coverage(
+        lambda: dict(duration=.1, latest_stamp=.04), 0, .1,
+        max_latest_lag=.1, now=lambda: clock[0], pause=pause,
+    )
+    assert result['latest_stamp'] == .04
     clock[0] = 0
     # Coverage alone is insufficient: don't call extrapolated old data fresh.
     with pytest.raises(RuntimeError, match='Insufficient'):
         wait_for_coverage(lambda: dict(duration=.1, latest_stamp=.01), 0, .1, timeout=.01,
                           now=lambda: clock[0], pause=pause)
     assert clock[0] < .02
+
+
+def test_coverage_threshold_tolerates_only_floating_point_roundoff():
+    result = wait_for_coverage(
+        lambda: dict(duration=.08 - 1e-12, latest_stamp=.1),
+        0, .1, min_coverage=.8,
+    )
+    assert result["duration"] < .08
+
+
+def test_paused_episode_clock_waits_for_queued_imu_callbacks():
+    clock = [0.0]
+    samples = iter([2040.82, 2070.0, 2081.78])
+    stamp = [2040.82]
+
+    def pause(dt):
+        clock[0] += dt
+        try:
+            stamp[0] = next(samples)
+        except StopIteration:
+            pass
+
+    result = wait_for_quiescent_timestamp(
+        lambda: stamp[0], timeout=.2, quiet_time=.01,
+        now=lambda: clock[0], pause=pause,
+    )
+    assert result == 2081.78
 
 
 def test_comparison_requires_matching_completed_experiments():

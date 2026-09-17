@@ -1,13 +1,16 @@
 seed: 42
 device: cuda
 control_hz: 10.0
-max_episode_seconds: 120.0
-target_finish_seconds: 90.0
-max_wheel_torque_nm: 0.5
-goal_tolerance_m: 0.45
+max_episode_seconds: 20.0
+target_finish_seconds: 15.0
+max_wheel_torque_nm: 2.0
+goal_tolerance_m: 0.01
+# If the robot center crosses beyond the goal plane without meeting all goal
+# conditions, end the episode immediately instead of letting it drive away.
+goal_overshoot_tolerance_m: 0.0
 goal_lateral_tolerance_m: 0.25
 goal_heading_tolerance_deg: 12.0
-goal_max_speed_m_s: 0.20
+goal_max_speed_m_s: 0.05
 goal_max_yaw_rate_rad_s: 0.30
 goal_max_tilt_deg: 10.0
 wrong_direction_heading_deg: 90.0
@@ -25,11 +28,24 @@ sensor_timeout_seconds: 5.0
 policy_v2:
   history_frames: 5
   imu_includes_gravity: true
+  imu_topic: /imu/data
   require_terrain_preview: false
   preview_timeout_seconds: 0.5
   simulation_step_wall_timeout_seconds: 10.0
+  # Matches long_hall.sdf. 50 steps per 10 Hz action keeps cable contacts
+  # stable while halving the physics cost of the original 1 ms setting.
+  simulation_physics_step_seconds: 0.002
+  sensor_wait_timeout_seconds: 2.0
   imu_wait_timeout_seconds: 0.5
   imu_min_coverage: 0.8
+  # Trajectory learning must not abort because Gazebo defers an IMU publisher
+  # during a fast lockstep burst. Partial energy is normalized to the action
+  # window; set true only when validating sensor transport itself.
+  imu_strict_coverage: false
+  # Gazebo can expose the final 50 Hz samples after the multi-step response.
+  # This matches ImuWindow's strict 100 ms zero-order-hold ceiling; larger
+  # gaps still fail instead of being scored as a smooth ride.
+  imu_max_latest_lag_seconds: 0.10
 
 reward_v2:
   progress_weight: 20.0
@@ -42,7 +58,7 @@ reward_v2:
   slip_weight: 0.1
   smoothness_weight: 0.02
   # Total post-limit PI + residual torque; 2.0 PI + 0.5 residual in this repo.
-  applied_torque_scale_nm: 2.5
+  applied_torque_scale_nm: 5.0
   effort_weight: 0.04
   saturation_weight: 0.03
   saturation_fraction: 0.90
@@ -51,12 +67,12 @@ reward_v2:
   # Bounded negative kernels: no positive standing/survival bonus.
   velocity_weight: 0.10
   overspeed_weight: 0.40
-  velocity_sigma_m_s: 0.20
+  velocity_sigma_m_s: 1.20
   yaw_tracking_weight: 0.15
   yaw_sigma_rad_s: 0.50
   goal_braking_weight: 0.15
   goal_braking_distance_m: 0.80
-  goal_speed_sigma_m_s: 0.20
+  goal_speed_sigma_m_s: 1.20
   goal_yaw_sigma_rad_s: 0.30
   time_penalty: 0.01
   stall_penalty: 0.5
@@ -67,41 +83,66 @@ reward_v2:
 
 path:
   lookahead_m: [0.5, 1.0, 2.0, 3.5, 5.0, 7.5, 10.0, 12.5, 15.0]
-  default_goal_x_m: 30.0
+  default_goal_x_m: 6.0
   point_spacing_m: 0.25
 
 navigation:
-  # Map-frame poses [x, y, yaw]. The hallway goal is before the front wall.
+  # Odometry-frame poses [x, y, yaw]. No Nav2 nodes, map, planner, or AMCL are
+  # used: the baseline command is always linear.x > 0 and angular.z = 0.
+  # The shortened 6 m route crosses the cable at x=4 m, retaining 2 m after
+  # the obstacle for recovery and drift scoring while reducing episode time.
   start_pose: [0.0, 0.0, 0.0]
-  goal_pose: [30.0, 0.0, 0.0]
-  plan_topic: /plan
-  nav_cmd_topic: /cmd_vel_nav
+  goal_pose: [6.0, 0.0, 0.0]
+  cmd_vel_topic: /cmd_vel
+  # 0.75 m/s = 12 rad/s at the 62.5 mm wheels: exactly the effort
+  # controller's configured wheel-speed limit for maximum cable-crossing speed.
+  straight_speed_m_s: 0.75
+  minimum_approach_speed_m_s: 0.03
+  goal_slowdown_distance_m: 1.00
   stale_seconds: 2.0
-  startup_timeout_seconds: 30.0
-  waypoint_spacing_m: 5.0
+  waypoint_spacing_m: 2.0
   waypoint_budget_seconds_per_m: 2.5
   waypoint_slack_seconds: 3.0
 
 curriculum:
   enabled: true
-  # Advance manually only after held-out evaluation; train --phase 1..6.
+  # Requested order is hard -> easy. Advance manually after held-out evaluation.
   fixed_phase: 1
-  # Flat -> fixed cable -> random position -> random angle -> random diameter
-  # -> multiple cables. Exactly one phase is active in each episode.
+  # All six phases contain exactly one cable. Difficulty changes only with
+  # cable diameter and absolute angle; see terrain_curriculum below.
   phase_fractions: [0.0, 0.15, 0.30, 0.50, 0.70, 0.85]
 
 terrain_curriculum:
-  fixed_cable_x_m: 8.0
-  fixed_cable_diameter_m: 0.016
-  cable_x_range_m: [4.0, 27.0]
-  max_cable_angle_deg: 45.0
-  cable_diameter_range_m: [0.012, 0.044]
-  max_cables: 6
+  cable_x_m: 4.0
+  # Larger diameter and greater skew are treated as harder. The sign of a
+  # nonzero angle is randomized per episode to avoid a left/right wheel bias.
+  phases_hard_to_easy:
+    - {name: hardest, diameter_m: 0.030, angle_deg: 45.0}
+    - {name: very_hard, diameter_m: 0.025, angle_deg: 36.0}
+    - {name: hard, diameter_m: 0.020, angle_deg: 27.0}
+    - {name: medium, diameter_m: 0.015, angle_deg: 18.0}
+    - {name: easy, diameter_m: 0.010, angle_deg: 9.0}
+    - {name: easiest, diameter_m: 0.005, angle_deg: 0.0}
+
+# Success-driven clutter around the main cable. One feature is added after
+# every successful episode until the cap. All geometry stays outside the clear
+# center corridor, so it increases sensing/recovery difficulty without blocking
+# the straight route. Evaluation freezes the count at evaluation_features.
+adaptive_terrain:
+  enabled: true
+  initial_features: 0
+  add_per_success: 1
+  max_features: 20
+  evaluation_features: 20
+  zone_x_m: [2.8, 5.2]
+  path_clearance_m: 0.60
+  max_lateral_center_m: 1.55
 
 domain_randomization:
-  enabled: true
-  # Ramp perturbations with terrain phase. Evaluation can request full strength.
-  phase_scales: [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+  # Disabled by default so phase difficulty is based only on cable size/angle.
+  # It can still be enabled explicitly for robustness experiments.
+  enabled: false
+  phase_scales: [1.0, 0.8, 0.6, 0.4, 0.2, 0.0]
   # Historical names: these affect the residual channel, NOT contact friction
   # or the PI motor dynamics. Delay uses simulation time.
 

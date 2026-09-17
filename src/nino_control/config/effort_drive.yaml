@@ -15,14 +15,14 @@ effort_drive:
     max_wheel_speed: 12.0
     max_wheel_acceleration: 12.0
     max_wheel_torque: 12.0
-    max_velocity_control_torque: 2.0
+    max_velocity_control_torque: 4.0
     # Avoid an unrealistically instantaneous torque step when a wheel unloads.
     max_effort_rate: 10.0
     command_timeout: 0.5
     torque_command_timeout: 0.25
-    # Run at the 1 ms Gazebo physics period.  A slower loop can let an
+    # Run at the 2 ms Gazebo training physics period. A slower loop can let an
     # unloaded wheel overshoot its velocity limit before effort is reduced.
-    control_rate: 1000.0
+    control_rate: 500.0
 
     odom_publish_rate: 50.0
     torque_status_publish_rate: 50.0
@@ -30,7 +30,6 @@ effort_drive:
     odom_frame_id: odom
     base_frame_id: base_footprint
     publish_odom_tf: true
-    # Baseline mode accepts /cmd_vel and ignores direct RL torque.  RL launch
-    # overrides these two switches so Nav2 remains a reference generator only.
+    # Straight baseline accepts /cmd_vel; training also enables RL residuals.
     accept_cmd_vel: true
     accept_torque: true

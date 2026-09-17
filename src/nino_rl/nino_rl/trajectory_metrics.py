@@ -157,15 +157,58 @@ def write_csv(filename, rows):
         writer.writerows(rows)
 
 
+def write_trajectory_plot(filename, actual_xy, reference_xy, frame_id,
+                          cable_x=None, cable_radius=None, cable_angle=None):
+    """Write an expected-versus-robot XY plot using a headless backend."""
+    actual = _finite_xy(actual_xy)
+    reference = _finite_xy(reference_xy)
+    import matplotlib
+    matplotlib.use("Agg")
+    from matplotlib import pyplot as plt
+    from math import cos, sin
+
+    fig, ax = plt.subplots(figsize=(9, 4))
+    ax.plot(*reference.T, "--", label="Expected trajectory", color="#1d4ed8",
+            linewidth=2.0)
+    ax.plot(*actual.T, label="Robot trajectory", color="#dc2626", linewidth=1.6)
+    ax.scatter(*reference[0], label="Start", color="#15803d", marker="o", zorder=3)
+    ax.scatter(*reference[-1], label="Goal", color="#7e22ce", marker="*",
+               s=90, zorder=3)
+    # Draw the cable obstacle if provided.
+    if cable_x is not None and cable_radius is not None and cable_angle is not None:
+        half_length = 2.0 / max(cos(cable_angle), 0.70)
+        x0 = cable_x - half_length * sin(cable_angle)
+        y0 = -half_length * cos(cable_angle)
+        x1 = cable_x + half_length * sin(cable_angle)
+        y1 = half_length * cos(cable_angle)
+        diameter_mm = cable_radius * 2000.0
+        ax.plot([x0, x1], [y0, y1], color="#374151", linewidth=3.0,
+                solid_capstyle="round", zorder=2,
+                label=f"Cable ({diameter_mm:.0f} mm)")
+    ax.set(xlabel="x [m]", ylabel="y [m]", title=f"Expected vs robot trajectory ({frame_id})")
+    ax.axis("equal")
+    ax.grid(alpha=.25)
+    ax.legend()
+    fig.tight_layout()
+    filename = Path(filename)
+    filename.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(filename, dpi=160)
+    plt.close(fig)
+
+
 class EpisodeTrajectory:
     """Collect estimated poses in the reference frame; never leak truth to actor."""
-    def __init__(self, reference_xy, frame_id, clock_origin_sim_s=0.0):
+    def __init__(self, reference_xy, frame_id, clock_origin_sim_s=0.0,
+                 cable_x=None, cable_radius=None, cable_angle=None):
         self.reference = _finite_xy(reference_xy)
         PathTracker(self.reference)
         if not frame_id or not np.isfinite(clock_origin_sim_s):
             raise ValueError("Need a frame and finite clock origin")
         self.frame_id = frame_id
         self.clock_origin_sim_s = float(clock_origin_sim_s)
+        self.cable_x = cable_x
+        self.cable_radius = cable_radius
+        self.cable_angle = cable_angle
         self.rows = []
 
     def add(self, time_s, x, y, yaw):
@@ -186,9 +229,21 @@ class EpisodeTrajectory:
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
         write_csv(directory / "actual.csv", self.rows)
+        # Descriptive alias for spreadsheet/matplotlib users. Keep actual.csv
+        # for compatibility with the trajectory_metrics CLI.
+        write_csv(directory / "trajectory.csv", self.rows)
         write_csv(directory / "reference.csv", [dict(x_m=float(x), y_m=float(y),
                   frame_id=self.frame_id) for x, y in self.reference])
         (directory / "metrics.json").write_text(json.dumps(self.metrics(), indent=2) + "\n")
+        write_trajectory_plot(
+            directory / "trajectory.png",
+            [[row["x_m"], row["y_m"]] for row in self.rows],
+            self.reference,
+            self.frame_id,
+            cable_x=self.cable_x,
+            cable_radius=self.cable_radius,
+            cable_angle=self.cable_angle,
+        )
 
 
 def main():
@@ -217,20 +272,9 @@ def main():
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
         if args.plot:
-            import matplotlib
-            matplotlib.use("Agg")
-            from matplotlib import pyplot as plt
-            fig, ax = plt.subplots(figsize=(9, 4))
-            ax.plot(*reference["xy"].T, "--", label="Reference", color="#1d4ed8")
-            ax.plot(*actual["xy"].T, label="Actual", color="#dc2626")
-            ax.set(xlabel="x [m]", ylabel="y [m]", title=f"Trajectory in {actual['frame']}")
-            ax.axis("equal")
-            ax.grid(alpha=.25)
-            ax.legend()
-            fig.tight_layout()
-            args.plot.parent.mkdir(parents=True, exist_ok=True)
-            fig.savefig(args.plot, dpi=160)
-            plt.close(fig)
+            write_trajectory_plot(
+                args.plot, actual["xy"], reference["xy"], actual["frame"]
+            )
         print(json.dumps(result, indent=2))
     except (ValueError, OSError) as error:
         parser.error(str(error))
