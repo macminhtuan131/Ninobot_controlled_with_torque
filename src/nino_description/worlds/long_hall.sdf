@@ -58,21 +58,6 @@
     <model name="enclosed_hall">
       <static>true</static>
       <link name="structure">
-        <collision name="floor_collision">
-          <pose>15 0 -0.05 0 0 0</pose>
-          <geometry><box><size>34 4 0.1</size></box></geometry>
-          <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
-        </collision>
-        <visual name="floor_visual">
-          <pose>15 0 -0.05 0 0 0</pose>
-          <geometry><box><size>34 4 0.1</size></box></geometry>
-          <material>
-            <ambient>0.32 0.34 0.37 1</ambient>
-            <diffuse>0.42 0.44 0.47 1</diffuse>
-            <specular>0.08 0.08 0.08 1</specular>
-          </material>
-        </visual>
-
         <collision name="left_wall_collision">
           <pose>15 2.1 1.5 0 0 0</pose>
           <geometry><box><size>34.4 0.2 3.0</size></box></geometry>
@@ -473,5 +458,2454 @@
         </visual>
       </link>
     </model>
+    <!-- Permanent end pads remain during episode terrain replacement. -->
+<model name="terrain_floor_v1">
+  <static>true</static>
+  <link name="permanent_end_pads">
+    <collision name="end_pad_0_collision">
+      <pose>0.000000000 0.000000000 -0.050000000 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>4.000000000 4.000000000 0.100000000</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="end_pad_0_visual">
+      <pose>0.000000000 0.000000000 -0.050000000 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>4.000000000 4.000000000 0.100000000</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.42 0.44 0.47 1</ambient>
+        <diffuse>0.42 0.44 0.47 1</diffuse>
+      </material>
+    </visual>
+    <collision name="end_pad_1_collision">
+      <pose>30.500000000 0.000000000 -0.050000000 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>3.000000000 4.000000000 0.100000000</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="end_pad_1_visual">
+      <pose>30.500000000 0.000000000 -0.050000000 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>3.000000000 4.000000000 0.100000000</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.42 0.44 0.47 1</ambient>
+        <diffuse>0.42 0.44 0.47 1</diffuse>
+      </material>
+    </visual>
+  </link>
+</model>
+    <!-- Preview course: 29 cables, 3 recessed potholes, 3 speed bumps.
+         Training resets replace this preview with the selected phase. -->
+<model name="training_terrain">
+  <static>true</static>
+  <link name="terrain">
+    <collision name="floor_0_collision">
+      <pose>3.912500000 0.000000000 -0.050000000 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>3.825000000 4.000000000 0.100000000</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="floor_0_visual">
+      <pose>3.912500000 0.000000000 -0.050000000 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>3.825000000 4.000000000 0.100000000</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.42 0.44 0.47 1</ambient>
+        <diffuse>0.42 0.44 0.47 1</diffuse>
+      </material>
+    </visual>
+    <collision name="floor_1_collision">
+      <pose>6.000000000 -1.200000000 -0.050000000 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.350000000 1.600000000 0.100000000</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="floor_1_visual">
+      <pose>6.000000000 -1.200000000 -0.050000000 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.350000000 1.600000000 0.100000000</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.42 0.44 0.47 1</ambient>
+        <diffuse>0.42 0.44 0.47 1</diffuse>
+      </material>
+    </visual>
+    <collision name="floor_2_collision">
+      <pose>6.000000000 1.200000000 -0.050000000 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.350000000 1.600000000 0.100000000</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="floor_2_visual">
+      <pose>6.000000000 1.200000000 -0.050000000 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.350000000 1.600000000 0.100000000</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.42 0.44 0.47 1</ambient>
+        <diffuse>0.42 0.44 0.47 1</diffuse>
+      </material>
+    </visual>
+    <collision name="floor_3_collision">
+      <pose>6.000000000 0.000000000 -0.057500000 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.350000000 0.800000000 0.085000000</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="floor_3_visual">
+      <pose>6.000000000 0.000000000 -0.057500000 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.350000000 0.800000000 0.085000000</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.42 0.44 0.47 1</ambient>
+        <diffuse>0.42 0.44 0.47 1</diffuse>
+      </material>
+    </visual>
+    <collision name="floor_4_collision">
+      <pose>11.200000000 0.000000000 -0.050000000 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>10.050000000 4.000000000 0.100000000</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="floor_4_visual">
+      <pose>11.200000000 0.000000000 -0.050000000 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>10.050000000 4.000000000 0.100000000</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.42 0.44 0.47 1</ambient>
+        <diffuse>0.42 0.44 0.47 1</diffuse>
+      </material>
+    </visual>
+    <collision name="floor_5_collision">
+      <pose>16.400000000 -1.200000000 -0.050000000 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.350000000 1.600000000 0.100000000</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="floor_5_visual">
+      <pose>16.400000000 -1.200000000 -0.050000000 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.350000000 1.600000000 0.100000000</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.42 0.44 0.47 1</ambient>
+        <diffuse>0.42 0.44 0.47 1</diffuse>
+      </material>
+    </visual>
+    <collision name="floor_6_collision">
+      <pose>16.400000000 1.200000000 -0.050000000 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.350000000 1.600000000 0.100000000</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="floor_6_visual">
+      <pose>16.400000000 1.200000000 -0.050000000 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.350000000 1.600000000 0.100000000</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.42 0.44 0.47 1</ambient>
+        <diffuse>0.42 0.44 0.47 1</diffuse>
+      </material>
+    </visual>
+    <collision name="floor_7_collision">
+      <pose>16.400000000 0.000000000 -0.060000000 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.350000000 0.800000000 0.080000000</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="floor_7_visual">
+      <pose>16.400000000 0.000000000 -0.060000000 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.350000000 0.800000000 0.080000000</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.42 0.44 0.47 1</ambient>
+        <diffuse>0.42 0.44 0.47 1</diffuse>
+      </material>
+    </visual>
+    <collision name="floor_8_collision">
+      <pose>18.900000000 0.000000000 -0.050000000 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>4.650000000 4.000000000 0.100000000</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="floor_8_visual">
+      <pose>18.900000000 0.000000000 -0.050000000 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>4.650000000 4.000000000 0.100000000</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.42 0.44 0.47 1</ambient>
+        <diffuse>0.42 0.44 0.47 1</diffuse>
+      </material>
+    </visual>
+    <collision name="floor_9_collision">
+      <pose>21.400000000 -1.200000000 -0.050000000 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.350000000 1.600000000 0.100000000</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="floor_9_visual">
+      <pose>21.400000000 -1.200000000 -0.050000000 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.350000000 1.600000000 0.100000000</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.42 0.44 0.47 1</ambient>
+        <diffuse>0.42 0.44 0.47 1</diffuse>
+      </material>
+    </visual>
+    <collision name="floor_10_collision">
+      <pose>21.400000000 1.200000000 -0.050000000 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.350000000 1.600000000 0.100000000</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="floor_10_visual">
+      <pose>21.400000000 1.200000000 -0.050000000 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.350000000 1.600000000 0.100000000</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.42 0.44 0.47 1</ambient>
+        <diffuse>0.42 0.44 0.47 1</diffuse>
+      </material>
+    </visual>
+    <collision name="floor_11_collision">
+      <pose>21.400000000 0.000000000 -0.065000000 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.350000000 0.800000000 0.070000000</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="floor_11_visual">
+      <pose>21.400000000 0.000000000 -0.065000000 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.350000000 0.800000000 0.070000000</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.42 0.44 0.47 1</ambient>
+        <diffuse>0.42 0.44 0.47 1</diffuse>
+      </material>
+    </visual>
+    <collision name="floor_12_collision">
+      <pose>25.287500000 0.000000000 -0.050000000 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>7.425000000 4.000000000 0.100000000</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="floor_12_visual">
+      <pose>25.287500000 0.000000000 -0.050000000 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>7.425000000 4.000000000 0.100000000</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.42 0.44 0.47 1</ambient>
+        <diffuse>0.42 0.44 0.47 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_3_0_collision">
+      <pose>11.308333333 0.000000000 0.000032082 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.000064164</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_3_0_visual">
+      <pose>11.308333333 0.000000000 0.000032082 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.000064164</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_3_1_collision">
+      <pose>11.325000000 0.000000000 0.000285452 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.000570904</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_3_1_visual">
+      <pose>11.325000000 0.000000000 0.000285452 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.000570904</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_3_2_collision">
+      <pose>11.341666667 0.000000000 0.000774925 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.001549850</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_3_2_visual">
+      <pose>11.341666667 0.000000000 0.000774925 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.001549850</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_3_3_collision">
+      <pose>11.358333333 0.000000000 0.001467145 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.002934289</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_3_3_visual">
+      <pose>11.358333333 0.000000000 0.001467145 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.002934289</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_3_4_collision">
+      <pose>11.375000000 0.000000000 0.002314937 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.004629874</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_3_4_visual">
+      <pose>11.375000000 0.000000000 0.002314937 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.004629874</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_3_5_collision">
+      <pose>11.391666667 0.000000000 0.003260527 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.006521054</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_3_5_visual">
+      <pose>11.391666667 0.000000000 0.003260527 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.006521054</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_3_6_collision">
+      <pose>11.408333333 0.000000000 0.004239473 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.008478946</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_3_6_visual">
+      <pose>11.408333333 0.000000000 0.004239473 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.008478946</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_3_7_collision">
+      <pose>11.425000000 0.000000000 0.005185063 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.010370126</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_3_7_visual">
+      <pose>11.425000000 0.000000000 0.005185063 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.010370126</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_3_8_collision">
+      <pose>11.441666667 0.000000000 0.006032855 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.012065711</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_3_8_visual">
+      <pose>11.441666667 0.000000000 0.006032855 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.012065711</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_3_9_collision">
+      <pose>11.458333333 0.000000000 0.006725075 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.013450150</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_3_9_visual">
+      <pose>11.458333333 0.000000000 0.006725075 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.013450150</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_3_10_collision">
+      <pose>11.475000000 0.000000000 0.007214548 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.014429096</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_3_10_visual">
+      <pose>11.475000000 0.000000000 0.007214548 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.014429096</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_3_11_collision">
+      <pose>11.491666667 0.000000000 0.007467918 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.014935836</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_3_11_visual">
+      <pose>11.491666667 0.000000000 0.007467918 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.014935836</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_3_12_collision">
+      <pose>11.508333333 0.000000000 0.007467918 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.014935836</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_3_12_visual">
+      <pose>11.508333333 0.000000000 0.007467918 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.014935836</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_3_13_collision">
+      <pose>11.525000000 0.000000000 0.007214548 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.014429096</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_3_13_visual">
+      <pose>11.525000000 0.000000000 0.007214548 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.014429096</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_3_14_collision">
+      <pose>11.541666667 0.000000000 0.006725075 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.013450150</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_3_14_visual">
+      <pose>11.541666667 0.000000000 0.006725075 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.013450150</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_3_15_collision">
+      <pose>11.558333333 0.000000000 0.006032855 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.012065711</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_3_15_visual">
+      <pose>11.558333333 0.000000000 0.006032855 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.012065711</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_3_16_collision">
+      <pose>11.575000000 0.000000000 0.005185063 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.010370126</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_3_16_visual">
+      <pose>11.575000000 0.000000000 0.005185063 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.010370126</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_3_17_collision">
+      <pose>11.591666667 0.000000000 0.004239473 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.008478946</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_3_17_visual">
+      <pose>11.591666667 0.000000000 0.004239473 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.008478946</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_3_18_collision">
+      <pose>11.608333333 0.000000000 0.003260527 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.006521054</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_3_18_visual">
+      <pose>11.608333333 0.000000000 0.003260527 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.006521054</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_3_19_collision">
+      <pose>11.625000000 0.000000000 0.002314937 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.004629874</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_3_19_visual">
+      <pose>11.625000000 0.000000000 0.002314937 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.004629874</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_3_20_collision">
+      <pose>11.641666667 0.000000000 0.001467145 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.002934289</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_3_20_visual">
+      <pose>11.641666667 0.000000000 0.001467145 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.002934289</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_3_21_collision">
+      <pose>11.658333333 0.000000000 0.000774925 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.001549850</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_3_21_visual">
+      <pose>11.658333333 0.000000000 0.000774925 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.001549850</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_3_22_collision">
+      <pose>11.675000000 0.000000000 0.000285452 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.000570904</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_3_22_visual">
+      <pose>11.675000000 0.000000000 0.000285452 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.000570904</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_3_23_collision">
+      <pose>11.691666667 0.000000000 0.000032082 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.000064164</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_3_23_visual">
+      <pose>11.691666667 0.000000000 0.000032082 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.000064164</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_4_0_collision">
+      <pose>19.908333333 0.000000000 0.000042776 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.000085551</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_4_0_visual">
+      <pose>19.908333333 0.000000000 0.000042776 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.000085551</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_4_1_collision">
+      <pose>19.925000000 0.000000000 0.000380602 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.000761205</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_4_1_visual">
+      <pose>19.925000000 0.000000000 0.000380602 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.000761205</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_4_2_collision">
+      <pose>19.941666667 0.000000000 0.001033233 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.002066467</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_4_2_visual">
+      <pose>19.941666667 0.000000000 0.001033233 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.002066467</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_4_3_collision">
+      <pose>19.958333333 0.000000000 0.001956193 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.003912386</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_4_3_visual">
+      <pose>19.958333333 0.000000000 0.001956193 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.003912386</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_4_4_collision">
+      <pose>19.975000000 0.000000000 0.003086583 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.006173166</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_4_4_visual">
+      <pose>19.975000000 0.000000000 0.003086583 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.006173166</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_4_5_collision">
+      <pose>19.991666667 0.000000000 0.004347369 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.008694738</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_4_5_visual">
+      <pose>19.991666667 0.000000000 0.004347369 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.008694738</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_4_6_collision">
+      <pose>20.008333333 0.000000000 0.005652631 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.011305262</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_4_6_visual">
+      <pose>20.008333333 0.000000000 0.005652631 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.011305262</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_4_7_collision">
+      <pose>20.025000000 0.000000000 0.006913417 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.013826834</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_4_7_visual">
+      <pose>20.025000000 0.000000000 0.006913417 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.013826834</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_4_8_collision">
+      <pose>20.041666667 0.000000000 0.008043807 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.016087614</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_4_8_visual">
+      <pose>20.041666667 0.000000000 0.008043807 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.016087614</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_4_9_collision">
+      <pose>20.058333333 0.000000000 0.008966767 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.017933533</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_4_9_visual">
+      <pose>20.058333333 0.000000000 0.008966767 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.017933533</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_4_10_collision">
+      <pose>20.075000000 0.000000000 0.009619398 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.019238795</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_4_10_visual">
+      <pose>20.075000000 0.000000000 0.009619398 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.019238795</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_4_11_collision">
+      <pose>20.091666667 0.000000000 0.009957224 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.019914449</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_4_11_visual">
+      <pose>20.091666667 0.000000000 0.009957224 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.019914449</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_4_12_collision">
+      <pose>20.108333333 0.000000000 0.009957224 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.019914449</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_4_12_visual">
+      <pose>20.108333333 0.000000000 0.009957224 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.019914449</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_4_13_collision">
+      <pose>20.125000000 0.000000000 0.009619398 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.019238795</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_4_13_visual">
+      <pose>20.125000000 0.000000000 0.009619398 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.019238795</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_4_14_collision">
+      <pose>20.141666667 0.000000000 0.008966767 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.017933533</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_4_14_visual">
+      <pose>20.141666667 0.000000000 0.008966767 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.017933533</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_4_15_collision">
+      <pose>20.158333333 0.000000000 0.008043807 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.016087614</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_4_15_visual">
+      <pose>20.158333333 0.000000000 0.008043807 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.016087614</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_4_16_collision">
+      <pose>20.175000000 0.000000000 0.006913417 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.013826834</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_4_16_visual">
+      <pose>20.175000000 0.000000000 0.006913417 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.013826834</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_4_17_collision">
+      <pose>20.191666667 0.000000000 0.005652631 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.011305262</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_4_17_visual">
+      <pose>20.191666667 0.000000000 0.005652631 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.011305262</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_4_18_collision">
+      <pose>20.208333333 0.000000000 0.004347369 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.008694738</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_4_18_visual">
+      <pose>20.208333333 0.000000000 0.004347369 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.008694738</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_4_19_collision">
+      <pose>20.225000000 0.000000000 0.003086583 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.006173166</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_4_19_visual">
+      <pose>20.225000000 0.000000000 0.003086583 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.006173166</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_4_20_collision">
+      <pose>20.241666667 0.000000000 0.001956193 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.003912386</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_4_20_visual">
+      <pose>20.241666667 0.000000000 0.001956193 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.003912386</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_4_21_collision">
+      <pose>20.258333333 0.000000000 0.001033233 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.002066467</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_4_21_visual">
+      <pose>20.258333333 0.000000000 0.001033233 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.002066467</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_4_22_collision">
+      <pose>20.275000000 0.000000000 0.000380602 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.000761205</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_4_22_visual">
+      <pose>20.275000000 0.000000000 0.000380602 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.000761205</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_4_23_collision">
+      <pose>20.291666667 0.000000000 0.000042776 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.000085551</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_4_23_visual">
+      <pose>20.291666667 0.000000000 0.000042776 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.000085551</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_5_0_collision">
+      <pose>26.408333333 0.000000000 0.000064164 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.000128327</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_5_0_visual">
+      <pose>26.408333333 0.000000000 0.000064164 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.000128327</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_5_1_collision">
+      <pose>26.425000000 0.000000000 0.000570904 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.001141807</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_5_1_visual">
+      <pose>26.425000000 0.000000000 0.000570904 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.001141807</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_5_2_collision">
+      <pose>26.441666667 0.000000000 0.001549850 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.003099700</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_5_2_visual">
+      <pose>26.441666667 0.000000000 0.001549850 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.003099700</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_5_3_collision">
+      <pose>26.458333333 0.000000000 0.002934289 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.005868579</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_5_3_visual">
+      <pose>26.458333333 0.000000000 0.002934289 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.005868579</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_5_4_collision">
+      <pose>26.475000000 0.000000000 0.004629874 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.009259749</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_5_4_visual">
+      <pose>26.475000000 0.000000000 0.004629874 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.009259749</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_5_5_collision">
+      <pose>26.491666667 0.000000000 0.006521054 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.013042107</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_5_5_visual">
+      <pose>26.491666667 0.000000000 0.006521054 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.013042107</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_5_6_collision">
+      <pose>26.508333333 0.000000000 0.008478946 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.016957893</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_5_6_visual">
+      <pose>26.508333333 0.000000000 0.008478946 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.016957893</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_5_7_collision">
+      <pose>26.525000000 0.000000000 0.010370126 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.020740251</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_5_7_visual">
+      <pose>26.525000000 0.000000000 0.010370126 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.020740251</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_5_8_collision">
+      <pose>26.541666667 0.000000000 0.012065711 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.024131421</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_5_8_visual">
+      <pose>26.541666667 0.000000000 0.012065711 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.024131421</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_5_9_collision">
+      <pose>26.558333333 0.000000000 0.013450150 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.026900300</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_5_9_visual">
+      <pose>26.558333333 0.000000000 0.013450150 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.026900300</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_5_10_collision">
+      <pose>26.575000000 0.000000000 0.014429096 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.028858193</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_5_10_visual">
+      <pose>26.575000000 0.000000000 0.014429096 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.028858193</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_5_11_collision">
+      <pose>26.591666667 0.000000000 0.014935836 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.029871673</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_5_11_visual">
+      <pose>26.591666667 0.000000000 0.014935836 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.029871673</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_5_12_collision">
+      <pose>26.608333333 0.000000000 0.014935836 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.029871673</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_5_12_visual">
+      <pose>26.608333333 0.000000000 0.014935836 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.029871673</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_5_13_collision">
+      <pose>26.625000000 0.000000000 0.014429096 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.028858193</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_5_13_visual">
+      <pose>26.625000000 0.000000000 0.014429096 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.028858193</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_5_14_collision">
+      <pose>26.641666667 0.000000000 0.013450150 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.026900300</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_5_14_visual">
+      <pose>26.641666667 0.000000000 0.013450150 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.026900300</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_5_15_collision">
+      <pose>26.658333333 0.000000000 0.012065711 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.024131421</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_5_15_visual">
+      <pose>26.658333333 0.000000000 0.012065711 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.024131421</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_5_16_collision">
+      <pose>26.675000000 0.000000000 0.010370126 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.020740251</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_5_16_visual">
+      <pose>26.675000000 0.000000000 0.010370126 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.020740251</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_5_17_collision">
+      <pose>26.691666667 0.000000000 0.008478946 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.016957893</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_5_17_visual">
+      <pose>26.691666667 0.000000000 0.008478946 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.016957893</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_5_18_collision">
+      <pose>26.708333333 0.000000000 0.006521054 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.013042107</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_5_18_visual">
+      <pose>26.708333333 0.000000000 0.006521054 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.013042107</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_5_19_collision">
+      <pose>26.725000000 0.000000000 0.004629874 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.009259749</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_5_19_visual">
+      <pose>26.725000000 0.000000000 0.004629874 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.009259749</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_5_20_collision">
+      <pose>26.741666667 0.000000000 0.002934289 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.005868579</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_5_20_visual">
+      <pose>26.741666667 0.000000000 0.002934289 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.005868579</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.9 0.65 0.05 1</ambient>
+        <diffuse>0.9 0.65 0.05 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_5_21_collision">
+      <pose>26.758333333 0.000000000 0.001549850 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.003099700</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_5_21_visual">
+      <pose>26.758333333 0.000000000 0.001549850 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.003099700</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_5_22_collision">
+      <pose>26.775000000 0.000000000 0.000570904 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.001141807</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_5_22_visual">
+      <pose>26.775000000 0.000000000 0.000570904 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.001141807</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+    <collision name="speed_bump_5_23_collision">
+      <pose>26.791666667 0.000000000 0.000064164 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.000128327</size>
+        </box>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>1.0</mu>
+            <mu2>1.0</mu2>
+          </ode>
+        </friction>
+      </surface>
+    </collision>
+    <visual name="speed_bump_5_23_visual">
+      <pose>26.791666667 0.000000000 0.000064164 0.000000000 0.000000000 0.000000000</pose>
+      <geometry>
+        <box>
+          <size>0.016666667 1.200000000 0.000128327</size>
+        </box>
+      </geometry>
+      <material>
+        <ambient>0.08 0.08 0.08 1</ambient>
+        <diffuse>0.08 0.08 0.08 1</diffuse>
+      </material>
+    </visual>
+  </link>
+</model>
   </world>
 </sdf>

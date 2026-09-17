@@ -15,7 +15,7 @@ setup(
         (
             "share/" + package_name,
             ["package.xml", "requirements.txt", "README.md", "README_VI.md", "ALGORITHM_V2.md",
-             "REWARD_POLICY_UPDATE.md", "RL_IMPROVEMENTS.md"],
+             "REWARD_POLICY_UPDATE.md", "RL_IMPROVEMENTS.md", "TERRAIN_AND_EVALUATION.md"],
         ),
         (os.path.join("share", package_name, "config"), glob("config/*.yaml")),
         (os.path.join("share", package_name, "launch"), glob("launch/*.launch.py")),

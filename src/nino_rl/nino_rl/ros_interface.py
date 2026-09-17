@@ -52,6 +52,7 @@ from std_srvs.srv import Trigger
 
 from tf2_ros import Buffer, TransformException, TransformListener
 
+from nino_rl.terrain import cable_layout, terrain_sdf
 from nino_rl.core import RobotState, quaternion_to_euler
 from nino_rl.control_v2 import ImuWindow, vertical_acceleration
 
@@ -1196,93 +1197,56 @@ class RosRobotInterface(Node):
 
 <diffuse>0.12 0.12 0.12 1</diffuse></material></visual></link></model></sdf>"""
 
-    def configure_training_cables(
+    def configure_training_cables(self, cables, timeout=5.0):
+        """Compatibility entry point for cable-only callers."""
+        self.configure_training_terrain(cable_layout(cables), timeout)
 
-        self, cables: list[tuple[float, float, float]], timeout: float = 5.0
+    def configure_training_terrain(self, layout, timeout=5.0):
+        """Replace floor and obstacles after resetting onto the permanent pad.
 
-    ) -> None:
-
-        """Replace the legacy dense cable model with this episode's curriculum."""
-
+        The end pads belong to terrain_floor_v1 and are never removed. Gazebo
+        keeps servicing entity requests without removing support under Nino.
+        Fail closed if the old, solid-floor world is still running.
+        """
+        sdf = terrain_sdf(layout)  # Validate before any scene mutation.
         if not self.delete_entity.wait_for_service(timeout_sec=timeout):
-
             raise TimeoutError(f"Missing {self.delete_entity.srv_name}")
-
-        # SceneBroadcaster exposes the actual models, including terrain left
-
-        # by an earlier trainer. Query it before removing anything so resets
-
-        # neither emit missing-entity errors nor leave old cables behind.
-
-        scene = subprocess.run(
-
-            [
-
-                "gz", "service", "-s", f"/world/{self.world_name}/scene/info",
-
-                "--reqtype", "gz.msgs.Empty", "--reptype", "gz.msgs.Scene",
-
-                "--timeout", str(int(timeout * 1000)), "--req", "",
-
-            ],
-
-            capture_output=True,
-
-            text=True,
-
-            timeout=timeout + 2.0,
-
-            env={**os.environ, "GZ_IP": "127.0.0.1"},
-
-        )
-
-        models = set(
-            re.findall(
-                r'^model\s*\{\n\s*name: "([^"]+)"',
-                scene.stdout,
-                re.M,
-            )
-        )
-
-        if scene.returncode != 0 or "nino" not in models:
-
-            raise RuntimeError("Could not query Gazebo models before terrain reset")
-
-        terrain_names = {"cable_bumps", *[f"training_cable_{i}" for i in range(8)]}
-
-        for name in sorted(models & terrain_names):
-
-            request = DeleteEntity.Request()
-
-            request.entity.name = name
-
-            request.entity.type = Entity.MODEL
-
-            response = self._wait_future(self.delete_entity.call_async(request), timeout)
-
-            if response is None or not response.success:
-
-                raise RuntimeError(f"Gazebo failed to remove {name}")
-
-        if not cables:
-
-            return
-
         if not self.spawn_entity.wait_for_service(timeout_sec=timeout):
-
             raise TimeoutError(f"Missing {self.spawn_entity.srv_name}")
-
-        for index, (x, radius, angle) in enumerate(cables):
-
-            name = f"training_cable_{index}"
-
-            request = self._cable_spawn_request(name, x, radius, angle)
-
-            response = self._wait_future(self.spawn_entity.call_async(request), timeout)
-
+        scene = subprocess.run(
+            ["gz", "service", "-s", f"/world/{self.world_name}/scene/info",
+             "--reqtype", "gz.msgs.Empty", "--reptype", "gz.msgs.Scene",
+             "--timeout", str(int(timeout * 1000)), "--req", ""],
+            capture_output=True, text=True, timeout=timeout + 2.0,
+            env={**os.environ, "GZ_IP": "127.0.0.1"})
+        models = set(re.findall(r'^model\s*\{\n\s*name: "([^"]+)"', scene.stdout, re.M))
+        if scene.returncode != 0 or "nino" not in models:
+            raise RuntimeError("Could not query Gazebo models before terrain reset")
+        if "terrain_floor_v1" not in models:
+            raise RuntimeError("Old solid-floor world: rebuild nino_description and restart Gazebo")
+        names = {name for name in models if name in {"training_terrain", "cable_bumps"}
+                 or re.fullmatch(r"training_cable_\d+", name)}
+        for name in sorted(names):
+            request = DeleteEntity.Request()
+            request.entity.name = name
+            request.entity.type = Entity.MODEL
+            response = self._wait_future(self.delete_entity.call_async(request), timeout)
             if response is None or not response.success:
+                raise RuntimeError(f"Gazebo failed to remove {name}")
+        request = self._terrain_spawn_request(sdf)
+        response = self._wait_future(self.spawn_entity.call_async(request), timeout)
+        if response is None or not response.success:
+            raise RuntimeError("Gazebo failed to spawn training_terrain")
 
-                raise RuntimeError(f"Gazebo failed to spawn {name}")
+    @staticmethod
+    def _terrain_spawn_request(sdf):
+        request = SpawnEntity.Request()
+        request.entity_factory.name = "training_terrain"
+        request.entity_factory.allow_renaming = False
+        request.entity_factory.sdf = sdf
+        # All geometry uses world coordinates in link-local poses.
+        request.entity_factory.pose.orientation.w = 1.0
+        return request
 
     @classmethod
 

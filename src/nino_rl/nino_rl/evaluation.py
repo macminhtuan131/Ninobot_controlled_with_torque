@@ -13,6 +13,7 @@ import numpy as np
 from nino_rl.core import load_config
 from nino_rl.control_v2 import BASELINE_ACTION, validate_model
 from nino_rl.trajectory_metrics import write_csv
+from nino_rl.terrain import TERRAIN_REVISION
 
 METRICS = ("path_rmse_m", "cross_track_rmse_m", "path_p95_m", "path_max_m",
            "heading_rmse_deg", "endpoint_error_m", "final_progress_fraction",
@@ -25,6 +26,7 @@ def benchmark_id(config):
     # perturbations must match. This is not a hash of external Gazebo binaries.
     ignored = {"reward", "reward_v2", "ppo", "device", "seed", "evaluation_baseline"}
     task = {k: v for k, v in config.items() if k not in ignored}
+    task["terrain_generator_revision"] = TERRAIN_REVISION
     return hashlib.sha256(json.dumps(task, sort_keys=True).encode()).hexdigest()
 
 
@@ -85,7 +87,7 @@ def run(baseline=False):
     import yaml
     (output / "config.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
     metadata = {
-        "schema_version": 1, "controller": "nav2_baseline" if baseline else "ppo",
+        "schema_version": 2, "terrain_generator_revision": TERRAIN_REVISION, "controller": "nav2_baseline" if baseline else "ppo",
         "model": str(args.model.resolve()) if not baseline else None,
         "phase": args.phase, "seed": args.seed, "randomized": args.randomized,
         "benchmark_id": benchmark_id(config),
@@ -98,9 +100,13 @@ def run(baseline=False):
     from nino_rl.ros_env import NinoGazeboEnv
     env = NinoGazeboEnv(config, total_training_steps=1)
     rows = []
+    layouts = []
     try:
         for episode in range(args.episodes):
             observation, reset_info = env.reset(seed=args.seed + episode)
+            layouts.append({"episode": episode + 1, "seed": args.seed + episode,
+                            "obstacles": reset_info["terrain_layout"]})
+            (output / "terrain_layouts.json").write_text(json.dumps(layouts, indent=2) + "\n")
             while True:
                 action = BASELINE_ACTION.copy() if baseline else model.predict(observation, deterministic=True)[0]
                 observation, _, terminated, truncated, info = env.step(action)
@@ -119,7 +125,10 @@ def run(baseline=False):
     finally:
         env.close()
         if rows:
-            summary = summarize(rows, {**metadata, "complete": len(rows) == args.episodes,
+            summary = summarize(rows, {**metadata,
+                                       "terrain_layouts_sha256": hashlib.sha256(
+                                           json.dumps(layouts, sort_keys=True).encode()).hexdigest(),
+                                       "complete": len(rows) == args.episodes,
                                        "requested_episodes": args.episodes})
             (output / "summary.json").write_text(json.dumps(summary, indent=2, allow_nan=False) + "\n")
     print(f"Saved evaluation: {output}")
@@ -129,7 +138,8 @@ def compare_summaries(baseline, candidate):
     for report in (baseline, candidate):
         if not report.get("complete"):
             raise ValueError("Do not compare incomplete evaluations")
-    for key in ("schema_version", "benchmark_id", "phase", "seed", "episodes", "randomized", "pose_source"):
+    for key in ("schema_version", "benchmark_id", "phase", "seed", "episodes", "randomized", "pose_source",
+                "terrain_generator_revision", "terrain_layouts_sha256"):
         if baseline.get(key) != candidate.get(key):
             raise ValueError(f"Evaluation mismatch: {key}; rerun with identical test settings")
     result = {"phase": baseline["phase"], "episodes": baseline["episodes"],

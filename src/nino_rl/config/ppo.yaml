@@ -87,7 +87,7 @@ curriculum:
   # Advance manually only after held-out evaluation; train --phase 1..6.
   fixed_phase: 1
   # Flat -> fixed cable -> random position -> random angle -> random diameter
-  # -> multiple cables. Exactly one phase is active in each episode.
+  # -> mixed cables, potholes and speed bumps. Exactly one phase is active in each episode.
   phase_fractions: [0.0, 0.15, 0.30, 0.50, 0.70, 0.85]
 
 terrain_curriculum:
@@ -97,6 +97,19 @@ terrain_curriculum:
   max_cable_angle_deg: 45.0
   cable_diameter_range_m: [0.012, 0.044]
   max_cables: 6
+  # Phase 6 only; disable to reproduce the cable-only curriculum.
+  # Disjoint X slots in [4, 27] keep spawn/goal pads and walls clear.
+  mixed_obstacles:
+    enabled: true
+    cable_count: 4
+    pothole_count: 3
+    speed_bump_count: 3
+    cable_diameter_range_m: [0.012, 0.032]
+    pothole_length_range_m: [0.30, 0.60]
+    pothole_width_range_m: [0.45, 0.90]
+    pothole_depth_range_m: [0.010, 0.030]
+    speed_bump_length_range_m: [0.40, 0.70]
+    speed_bump_height_range_m: [0.010, 0.030]
 
 domain_randomization:
   enabled: true

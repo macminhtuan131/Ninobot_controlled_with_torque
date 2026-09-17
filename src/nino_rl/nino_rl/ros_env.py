@@ -22,6 +22,7 @@ from nino_rl.core import (
     metrics_dict,
     wheel_slip_ratios,
 )
+from nino_rl.terrain import cable_layout, mixed_layout
 from nino_rl.ros_interface import RosRobotInterface
 from nino_rl.trajectory_metrics import EpisodeTrajectory
 from nino_rl.control_v2 import (
@@ -292,8 +293,17 @@ class NinoGazeboEnv(gym.Env):
         self._last_noisy_state = None
         self._sample_randomization()
         stage, level, goal_x = self._curriculum_stage()
+        # Terrain is exchanged only while the robot is on a permanent end pad.
+        sx, sy, _ = self.start_pose
+        if not ((-1.35 <= sx <= 1.35 or 29.65 <= sx <= 31.35) and abs(sy) <= 1.35):
+            raise ValueError("Training start_pose must fit a permanent end pad with 0.65 m clearance")
+        terrain = self.config["terrain_curriculum"]
+        mixed = terrain.get("mixed_obstacles", {})
+        self.terrain_layout = (mixed_layout(terrain, self.np_random)
+            if stage == 5 and mixed.get("enabled", False)
+            else cable_layout(self._curriculum_cables(stage)))
         self.ros.reset_episode(start_pose=self.start_pose)
-        self.ros.configure_training_cables(self._curriculum_cables(stage))
+        self.ros.configure_training_terrain(self.terrain_layout)
         self.ros.initialize_navigation(
             self.start_pose, self.goal_pose, timeout=self.nav_startup_timeout
         )
@@ -349,6 +359,7 @@ class NinoGazeboEnv(gym.Env):
             "curriculum_stage": stage + 1,
             "curriculum_level": level,
             "goal_x_m": goal_x,
+            "terrain_layout": deepcopy(self.terrain_layout),
         }
 
     def step(self, action):

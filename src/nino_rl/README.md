@@ -5,6 +5,10 @@ continuous actions: Nav2 speed scale, common torque residual and differential
 torque residual. The robot has passive caster supports; it is not a two-wheel
 inverted pendulum. CUDA training is the default.
 
+For potholes, cables, speed bumps and commands to check training results, see
+[TERRAIN_AND_EVALUATION.md](TERRAIN_AND_EVALUATION.md). Phase 6 now supports
+configurable mixed terrain; phase 1 remains flat.
+
 1. Follow [the complete root README](../../README.md) from Ubuntu/driver setup
    through ROS/Gazebo, the Python venv, build, preflight and training.
 2. Read [RL_IMPROVEMENTS.md](RL_IMPROVEMENTS.md) for the exact active reward,

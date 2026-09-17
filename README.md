@@ -275,7 +275,12 @@ The baseline receives zero residual torque, including under randomized testing.
 | 3 | Random cable position | 40% |
 | 4 | Random angle | 60% |
 | 5 | Random diameter | 80% |
-| 6 | Multiple cables | 100% |
+| 6 | Mixed cables, potholes and speed bumps | 100% |
+
+Phase-6 geometry is configurable under `terrain_curriculum.mixed_obstacles`.
+See [mixed terrain and evaluation commands](src/nino_rl/TERRAIN_AND_EVALUATION.md)
+for dimensions, rebuild/restart steps and baseline/PPO result checking. Old
+saved configs without that section retain cable-only phase 6.
 
 Suggested initial gate: at least 19/20 held-out successes, no rollover/collision,
 acceptable P95 path error (e.g. <0.25 m for this hallway), and no material comfort
