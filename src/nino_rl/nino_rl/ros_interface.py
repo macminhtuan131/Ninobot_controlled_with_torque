@@ -67,6 +67,9 @@ SENSOR_QOS = QoSProfile(
 
 )
 
+IMU_QOS = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=100,
+                     reliability=ReliabilityPolicy.BEST_EFFORT)
+
 AMCL_POSE_QOS = QoSProfile(
 
     history=HistoryPolicy.KEEP_LAST,
@@ -157,7 +160,7 @@ class RosRobotInterface(Node):
 
         )
 
-        self.create_subscription(Imu, "/imu/data", self._imu_callback, SENSOR_QOS)
+        self.create_subscription(Imu, "/imu/data", self._imu_callback, IMU_QOS)
 
         self.create_subscription(JointState, "/joint_states", self._joint_callback, SENSOR_QOS)
 
@@ -269,6 +272,7 @@ class RosRobotInterface(Node):
 
         with self._lock:
 
+            self._state.odom_stamp_s = message.header.stamp.sec + message.header.stamp.nanosec * 1e-9
             self._state.x = float(message.pose.pose.position.x)
 
             self._state.y = float(message.pose.pose.position.y)
@@ -635,6 +639,27 @@ class RosRobotInterface(Node):
     def measure_impact(self, start, end, sigma=2.0):
         with self._lock:
             return self.imu_window.measure(start, end, sigma)
+
+    def wait_for_impact(self, start, end, sigma=2.0, timeout=0.5, min_coverage=0.8):
+        # /clock and /imu arrive on different DDS queues. Freeze the requested
+        # interval while waiting; a real missing interval still raises.
+        from nino_rl.timing import wait_for_coverage
+        return wait_for_coverage(lambda: self.measure_impact(start, end, sigma),
+                                 start, end, timeout, min_coverage)
+
+    def pose_in_frame(self, state, frame):
+        if frame == "odom":
+            return state.x, state.y, state.yaw
+        try:
+            transform = self.tf_buffer.lookup_transform(frame, "odom", Time())
+        except TransformException as error:
+            raise RuntimeError(f"Cannot score trajectory without {frame} <- odom TF") from error
+        q = transform.transform.rotation
+        _, _, yaw = quaternion_to_euler(q.x, q.y, q.z, q.w)
+        t = transform.transform.translation
+        return (t.x + cos(yaw)*state.x - sin(yaw)*state.y,
+                t.y + sin(yaw)*state.x + cos(yaw)*state.y,
+                state.yaw + yaw)
 
     def ground_truth_ready(self, timeout=2.0):
         with self._lock:

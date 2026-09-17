@@ -1,374 +1,350 @@
-# Nino Robot — ROS 2 Jazzy, Gazebo Sim, sensors, and torque control
+# Nino: Nav2 + residual PPO, CUDA training and trajectory evaluation
 
-This ROS 2 workspace contains the Nino differential-drive AMR description,
-Gazebo Sim Harmonic world, wheel-torque control stack, IMU, wheel encoders, and
-2D lidar. The robot spawns at world pose `0 0 0` and can be driven through
-`/cmd_vel` or direct torque commands.
+This branch controls the **caster-supported differential-drive Nino AMR** in
+ROS 2 Jazzy / Gazebo Harmonic. The model has two powered wheels, two passive
+casters, IMU, wheel encoders and **2D** LiDAR. It is not an unsupported two-wheel
+inverted pendulum. The pipeline is Nav2 → wheel-speed PI + bounded PPO residuals
+→ effort controller. PPO also scales the Nav2 velocity reference.
 
-The `add_rl` branch also includes CPU-first PPO training, evaluation,
-and a Nav2-aware wheel-torque policy. See the complete Vietnamese guide:
-[src/nino_rl/README_VI.md](src/nino_rl/README_VI.md).
+The updated workflow uses NVIDIA CUDA by default and refuses an automatic CPU
+fallback. Gazebo physics and ROS still consume CPU; this is one Gazebo world,
+not GPU-parallel Isaac Lab simulation. Keep only one train/evaluate/policy
+process connected to that world at a time.
 
-The current [reward and history-policy update](src/nino_rl/REWARD_POLICY_UPDATE.md)
-uses 300 stacked inputs and 3 residual-control actions. Start a fresh training run
-for this update. The Nav2-guided architecture, six-phase terrain
-curriculum, mandatory preflight, baseline comparison, and preserved-map notes
-are documented in [src/nino_rl/README.md](src/nino_rl/README.md).
+- [Reward, policy and engineering decisions](src/nino_rl/RL_IMPROVEMENTS.md)
+- [Vietnamese quick guide](src/nino_rl/README_VI.md)
+- [Simulation and hardware reference](docs/HARDWARE_REFERENCE.md)
 
-The simulator uses this control path:
+Start a **new training run** after applying this update: reward, timing and
+randomization semantics have changed (training contract revision 4). Earlier
+300-input/3-action checkpoints remain structurally usable for inference, but
+cannot be resumed into this training contract. Old 54-input/2-action models are
+incompatible. No pretrained weights or measured performance gains are included.
 
-```text
-/cmd_vel ──> effort_drive PI loop ──> /wheel_effort_controller/commands
-                                             │
-                                             v
-                              JointGroupEffortController
-                                             │
-                                             v
-                          left/right joint effort interfaces
-                                             │
-                                             v
-                                  gz_ros2_control + Gazebo
-```
+## 1. Prepare Ubuntu and the NVIDIA GPU
 
-## Workspace layout
-
-```text
-ninorobot/
-├── README.md
-└── src/
-    ├── nino_description/
-    │   ├── launch/sim.launch.py
-    │   ├── meshes/
-    │   ├── urdf/nino.urdf.xacro
-    │   └── worlds/
-    │       ├── long_hall.sdf
-    │       └── flat_world.sdf
-    └── nino_control/
-        ├── config/controllers.yaml
-        ├── config/effort_drive.yaml
-        ├── nino_control/effort_drive.py
-        ├── nino_control/kinematics.py
-        └── test/test_kinematics.py
-```
-
-`nino_description` owns geometry and simulation bring-up. `nino_control` owns
-controller configuration, torque control, differential-drive kinematics, and
-wheel odometry.
-
-## Install dependencies
-
-ROS 2 Jazzy binary packages target Ubuntu 24.04. Ubuntu 22.04 requires a Jazzy
-source build or an Ubuntu 24.04 ROS container.
+Use Ubuntu **24.04**, its system Python **3.12**, and an NVIDIA-capable machine.
+Run these commands on the machine that will actually train, not a separate
+laptop without the GPU. Skip driver installation if `nvidia-smi` already works.
 
 ```bash
 sudo apt update
-sudo apt install ros-jazzy-ros-gz ros-jazzy-xacro \
-  ros-jazzy-robot-state-publisher ros-jazzy-teleop-twist-keyboard \
-  ros-jazzy-gz-ros2-control ros-jazzy-controller-manager \
-  ros-jazzy-effort-controllers \
-  ros-jazzy-joint-state-broadcaster ros-jazzy-ros2controlcli ros-jazzy-rviz2 \
-  python3-colcon-common-extensions
+sudo apt install git curl locales software-properties-common \
+  python3-venv python3-pip build-essential ubuntu-drivers-common
+sudo locale-gen en_US en_US.UTF-8
+sudo update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
+export LANG=en_US.UTF-8
+ubuntu-drivers devices
+sudo ubuntu-drivers install
+sudo reboot
 ```
 
-You can also let `rosdep` resolve package dependencies. Initialize it once,
-then install everything declared by this workspace:
+After reboot, `nvidia-smi` must list the intended GPU (for example RTX 4080).
+Resolve driver/Secure Boot issues before installing RL dependencies. Installing
+`nvidia-utils` alone does not install a working kernel driver. See
+[Ubuntu's NVIDIA driver guide](https://documentation.ubuntu.com/server/how-to/graphics/install-nvidia-drivers/).
+
+## 2. Install ROS 2 Jazzy, Gazebo, Nav2 and RViz
+
+If `/opt/ros/jazzy/setup.bash` already exists, skip the ROS repository setup.
+Otherwise enable Universe and install the official ROS apt-source package:
+
+```bash
+sudo add-apt-repository universe
+NINO_ROS_APT_VERSION=$(curl -fsSL https://api.github.com/repos/ros-infrastructure/ros-apt-source/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')
+curl -fL -o /tmp/nino-ros2-apt-source.deb "https://github.com/ros-infrastructure/ros-apt-source/releases/download/${NINO_ROS_APT_VERSION}/ros2-apt-source_${NINO_ROS_APT_VERSION}.noble_all.deb"
+sudo dpkg -i /tmp/nino-ros2-apt-source.deb
+sudo apt update
+sudo apt upgrade
+sudo apt install ros-jazzy-desktop ros-dev-tools
+```
+
+Install the robot dependencies:
+
+```bash
+sudo apt install python3-rosdep python3-colcon-common-extensions \
+  ros-jazzy-ros-gz ros-jazzy-ros-gz-interfaces ros-jazzy-gz-ros2-control \
+  ros-jazzy-xacro ros-jazzy-robot-state-publisher ros-jazzy-controller-manager \
+  ros-jazzy-effort-controllers ros-jazzy-joint-state-broadcaster \
+  ros-jazzy-ros2controlcli ros-jazzy-navigation2 ros-jazzy-nav2-bringup \
+  ros-jazzy-slam-toolbox ros-jazzy-robot-localization ros-jazzy-rviz2 \
+  ros-jazzy-tf2-ros
+source /opt/ros/jazzy/setup.bash
+```
+
+Use the [official Jazzy installation guide](https://docs.ros.org/en/jazzy/Installation/Ubuntu-Install-Debs.html)
+if repository packaging changes. `ros-jazzy-ros-gz` supplies the compatible
+Gazebo integration; do not install Gazebo Classic for this project.
+
+## 3. Get the source and apply the patch
+
+For a fresh checkout:
+
+```bash
+cd ~
+git clone --branch add_rl https://github.com/macminhtuan131/Ninobot_controlled_with_torque.git ninorobot
+cd ~/ninorobot
+```
+
+For an existing checkout, enter its directory and check `git status`. Preserve
+local edits before changing branches. The supplied patch was made against
+`d015b8239648c64974e5badd041aa87f3a5a0fdc` on `add_rl`.
+
+```bash
+git rev-parse HEAD
+git apply --check ~/Downloads/ninobot-rl-improvements.patch
+git apply ~/Downloads/ninobot-rl-improvements.patch
+```
+
+Use the actual download path. If the check reports conflicts, stop and reconcile
+the branch/local changes; do not force the patch or discard your work.
+Skip applying the patch if these changes are already in your checkout.
+
+Initialize rosdep once (skip `init` if already initialized), then resolve the
+packages required by this training workspace:
 
 ```bash
 sudo rosdep init
 rosdep update
-cd /home/tue/ninorobot
-rosdep install --from-paths src --ignore-src --rosdistro jazzy -r -y
+rosdep install --from-paths src/nino_description src/nino_control src/nino_rl \
+  src/linorobot2/linorobot2_navigation --ignore-src --rosdistro jazzy -r -y
 ```
 
-If `rosdep init` reports that its sources list already exists, skip that first
-command and continue with `rosdep update`.
-
-## Build and run
+## 4. Create the Python environment and install CUDA PyTorch
 
 ```bash
-cd /home/tue/ninorobot
+cd ~/ninorobot
 source /opt/ros/jazzy/setup.bash
-colcon build --symlink-install
+python3 -m venv --system-site-packages .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install --upgrade --force-reinstall torch==2.13.0 \
+  --index-url https://download.pytorch.org/whl/cu126
+python -m pip install -r src/nino_rl/requirements.txt
+python -m pip check
+python -c 'import torch; print(torch.__version__, torch.version.cuda); assert torch.cuda.is_available(); print(torch.cuda.get_device_name(0))'
+```
+
+The CUDA 12.6 wheel above is an explicit example from the
+[official PyTorch version matrix](https://pytorch.org/get-started/previous-versions/).
+Use a compatible NVIDIA driver. A `+cpu` wheel or `torch.version.cuda == None`
+is wrong for this workflow. The system CUDA toolkit is not required just to use
+these wheels. `--system-site-packages` is necessary for ROS Python modules;
+`python3-venv` prevents the `ensurepip is not available` error.
+
+## 5. Build with the venv interpreter
+
+```bash
+cd ~/ninorobot
+source /opt/ros/jazzy/setup.bash
+source .venv/bin/activate
+python -m colcon build --symlink-install --packages-up-to nino_rl
 source install/setup.bash
-ros2 launch nino_description sim.launch.py
+ros2 run nino_rl check_cuda
 ```
 
-For RL training, build the Python packages with the project venv interpreter
-as described in [the Nav2-guided RL guide](src/nino_rl/README.md); otherwise
-the installed training command cannot import PyTorch or Stable-Baselines3.
+Expect `CUDA khả dụng: True`, the correct GPU, and a successful CUDA matrix
+multiplication. Always use **`python -m colcon` inside the venv** so installed
+Python entry points can import PyTorch. Do not move the venv after building.
 
-To open the sensor view and print all three sensors in the launch terminal:
+For every new terminal, run these four lines first:
 
 ```bash
-ros2 launch nino_description sim.launch.py rviz:=true sensor_monitor:=true
+cd ~/ninorobot
+source /opt/ros/jazzy/setup.bash
+source .venv/bin/activate
+source install/setup.bash
 ```
 
-RViz displays the lidar scan, robot, encoder odometry, and TF tree. The terminal
-monitor prints IMU vectors, left/right encoder position and velocity, lidar
-sample count, nearest range, and the received rate for every source.
+## 6. Start simulation and check it
 
-For a server-only run:
+Terminal A:
 
 ```bash
-ros2 launch nino_description sim.launch.py headless:=true
+ros2 launch nino_rl training_sim.launch.py headless:=true rviz:=false
 ```
 
-The robot spawns at `x=0`, `y=0`, `z=0`, and `yaw=0`. RL episode reset also
-sets this physical Gazebo pose explicitly before resetting wheel odometry and
-controller state. Do not start a second copy of the launch file while one is
-already running. `Ctrl-C` requests a clean Gazebo server stop and should finish
-without a false process-crash error.
-
-## Verify ros2_control
-
-With the simulation running:
+For visual debugging, stop that launch and restart with
+`headless:=false rviz:=true`. Do not launch both copies. This training launch
+starts the effort controller, sensors, AMCL/Nav2 and Gazebo reset services.
+Wait for readiness/localization. Terminal B:
 
 ```bash
 ros2 control list_controllers
-ros2 control list_hardware_interfaces
-ros2 topic hz /joint_states
-```
-
-The expected active controllers are `joint_state_broadcaster` and
-`wheel_effort_controller`. The claimed command interfaces are:
-
-```text
-left_wheel_joint/effort
-right_wheel_joint/effort
-```
-
-The controller's input is a `std_msgs/msg/Float64MultiArray` ordered as
-`[left_wheel_joint, right_wheel_joint]`.
-
-## View IMU, encoder, and lidar data
-
-The simulated sensors use standard ROS 2 messages and Linorobot2 topic names:
-
-| Sensor | Topic | Type | Frame/rate |
-|---|---|---|---|
-| IMU | `/imu/data` | `sensor_msgs/msg/Imu` | `imu_link`, 50 Hz |
-| Wheel encoders | `/joint_states` | `sensor_msgs/msg/JointState` | left/right joints, 500 Hz |
-| 2D lidar | `/scan` | `sensor_msgs/msg/LaserScan` | `laser`, 10 Hz |
-
-View each complete message:
-
-```bash
-ros2 topic echo /imu/data
-ros2 topic echo /joint_states
-ros2 topic echo /scan
-```
-
-Or view all three as a compact live summary:
-
-```bash
-ros2 run nino_control sensor_monitor --ros-args -p use_sim_time:=true
-```
-
-Check that data is flowing at the expected rates:
-
-```bash
+ros2 param get /effort_drive accept_torque
 ros2 topic hz /imu/data
-ros2 topic hz /joint_states
-ros2 topic hz /scan
 ```
 
-Plot the IMU angular velocity in real time:
+Both `joint_state_broadcaster` and `wheel_effort_controller` must be active;
+`accept_torque` must be `True`. Stop the topic-rate command with Ctrl-C.
+The nominal IMU frequency is 50 Hz in simulation time. The training command
+performs the mandatory 12-point preflight, including actuation, before learning.
+Use `training_sim.launch.py`, not the standalone description launch, for RL.
+
+## 7. Smoke-test, then train phase 1
+
+Keep Terminal A running. Terminal B:
 
 ```bash
-source /opt/ros/jazzy/setup.bash
-ros2 run rqt_plot rqt_plot -e \
-  /imu/data/angular_velocity/x:y:z
+ros2 run nino_rl train --device cuda --phase 1 --timesteps 4096 --check-env
 ```
 
-`QLayout::removeWidget: Cannot remove a null widget` is a harmless startup
-warning from `rqt_plot` 1.4.5 on Jazzy. If the plot window opens, it can be
-ignored. If no curves appear, first verify the sensor with
-`ros2 topic echo /imu/data --once` and `ros2 topic hz /imu/data`.
-
-To capture an exact 30-second interval, run:
+This is a plumbing test, not enough training to learn a useful policy. Once it
+works, start the real run:
 
 ```bash
-timeout --signal=INT 30s ros2 bag record -o imu_30s /imu/data
+ros2 run nino_rl train --device cuda --phase 1 --timesteps 500000 \
+  --checkpoint-every 25000
 ```
 
-In `/joint_states`, `position` is the encoder angle in radians and `velocity`
-is radians per second. Match values to `left_wheel_joint` and
-`right_wheel_joint` using the same array index in `name`, `position`, and
-`velocity`.
+The run prints its directory, e.g. `rl_runs/20260917-123456-123456/`. It contains
+`ppo.yaml`, software/device metadata, `monitor.csv`, TensorBoard logs,
+`checkpoints/nino_ppo_*_steps.zip` and `nino_ppo_final.zip` when finished.
+Rollouts are 2048 steps, so SB3 can exceed the requested step count to complete
+a rollout. A 500000-step run needs at least 50000 simulated seconds at 10 Hz,
+plus reset/update overhead; actual wall time depends on Gazebo throughput.
 
-## Drive with `/cmd_vel`
-
-The default `effort_drive` node converts desired base velocity into wheel-speed
-targets, closes a PI loop using measured `/joint_states`, and sends bounded
-torque to `JointGroupEffortController`.
-
-Keyboard control:
+Terminal C:
 
 ```bash
-ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=/cmd_vel
+tensorboard --logdir rl_runs --port 6006
 ```
 
-Constant forward command:
+Open `http://localhost:6006`. Inspect success, path RMSE/P95, completion,
+heading RMSE, impact RMS, torque, reward terms and PPO KL/entropy together.
+Gazebo is paused during optimizer updates so an update does not consume the
+mission deadline. CUDA memory usage alone is not evidence of successful learning.
+
+A Ctrl-C or runtime transport failure saves `nino_ppo_interrupted.zip` if a
+model exists; its unfinished rollout is discarded on resume. Fix the transport
+problem before continuing. Resume only revision-4 runs with their saved config:
 
 ```bash
-ros2 topic pub --rate 10 /cmd_vel geometry_msgs/msg/Twist \
-  "{linear: {x: 0.3}, angular: {z: 0.0}}"
+ros2 run nino_rl train --device cuda --phase 1 --timesteps 500000 \
+  --config rl_runs/YOUR_RUN/ppo.yaml \
+  --resume rl_runs/YOUR_RUN/checkpoints/nino_ppo_25000_steps.zip
 ```
 
-The `/cmd_vel` watchdog applies zero target velocity after 0.5 seconds without
-a new command.
+`--timesteps` is additional training. A saved but never-updated model is still
+untrained. Training seeds are set by `seed` in the YAML; use separate configs
+with different seeds for repeatability checks.
 
-## Control wheel torque directly
+## 8. Evaluate baseline and PPO automatically
 
-The safe direct-torque input is `/wheel_torque_commands`. Values are N·m in
-left/right order, are clamped to the configured limit, and expire after 0.25 s.
-
-Apply `0.8 N·m` to both wheels:
+Stop the trainer; keep the same training simulation running. Run these commands
+**sequentially**, using the real model/config paths printed by training:
 
 ```bash
-ros2 topic pub --rate 20 /wheel_torque_commands \
-  std_msgs/msg/Float64MultiArray "{data: [0.8, 0.8]}"
+ros2 run nino_rl evaluate_baseline --phase 1 --episodes 20 --seed 10000 \
+  --config rl_runs/YOUR_RUN/ppo.yaml --output rl_runs/baseline-p1
+ros2 run nino_rl evaluate --device cuda --phase 1 --episodes 20 --seed 10000 \
+  --config rl_runs/YOUR_RUN/ppo.yaml --model rl_runs/YOUR_RUN/nino_ppo_final.zip \
+  --output rl_runs/ppo-p1
 ```
 
-The two entries are independent. For example, apply `0.8 N·m` to the left
-wheel and `0.4 N·m` to the right wheel:
+Each command prints a timestamped report directory. It contains `summary.json`,
+`episodes.csv`, a config/metadata snapshot, and for every completed episode:
+`episode-001/actual.csv`, `reference.csv`, and `metrics.json`. Automatic metrics
+include time-weighted path/cross-track RMSE, P95/max path error, heading RMSE,
+endpoint error, completion, backtracking, success, timing, slip, torque and IMU
+impact. Incomplete evaluations are marked and cannot be compared as full runs.
 
 ```bash
-ros2 topic pub --rate 20 /wheel_torque_commands \
-  std_msgs/msg/Float64MultiArray "{data: [0.8, 0.4]}"
+ros2 run nino_rl compare_evaluations \
+  --baseline rl_runs/baseline-p1/BASELINE_STAMP/summary.json \
+  --candidate rl_runs/ppo-p1/PPO_STAMP/summary.json \
+  --output rl_runs/comparison-p1.json
 ```
 
-Use a negative value to reverse a wheel. The order is always
-`[left_wheel_joint, right_wheel_joint]`.
+Compare **success first**, then errors/comfort and successful completion time.
+A stopped or failed robot can have low RMSE. Reports separate all episodes from
+successful episodes. The comparator checks phase, seeds, count, perturbation
+mode and task config. Matching seeds reproduce the terrain draws; they do not
+make asynchronous Gazebo/Nav2 execution bitwise deterministic.
 
-Stop the publisher with `Ctrl-C`. The timeout returns both commands to zero.
-Monitor the torque actually sent by the adapter:
+`--randomized` on **both** evaluators tests full-strength residual/sensor
+perturbations even in phase 1. These are not physical friction/mass changes.
+The baseline receives zero residual torque, including under randomized testing.
+
+## 9. Advance the terrain curriculum after evaluation
+
+| Phase | Terrain | Training perturbation strength |
+|---|---|---:|
+| 1 | Flat | 0% |
+| 2 | One fixed cable | 20% |
+| 3 | Random cable position | 40% |
+| 4 | Random angle | 60% |
+| 5 | Random diameter | 80% |
+| 6 | Multiple cables | 100% |
+
+Suggested initial gate: at least 19/20 held-out successes, no rollover/collision,
+acceptable P95 path error (e.g. <0.25 m for this hallway), and no material comfort
+regression versus baseline. These are proposed acceptance criteria, not measured
+results. Use additional seeds for a final test, distinct from development seeds.
 
 ```bash
-ros2 topic echo /wheel_torque_applied
+ros2 run nino_rl train --device cuda --phase 2 --timesteps 500000 \
+  --config rl_runs/PHASE1_RUN/ppo.yaml \
+  --resume rl_runs/PHASE1_RUN/nino_ppo_final.zip
 ```
 
-This topic reports the safe applied command, which can be lower than the
-requested torque while the torque ramp or wheel-speed guard is active.
+Evaluate phase 2 using the same phase/seeds for baseline and PPO. Repeat for
+phases 3–6, resuming the preceding successful phase. Do not start phase 6 from
+random weights. Keep several checkpoints; the final one is not automatically
+best. Evaluate them on the same development seeds, then test the chosen model
+on new seeds. Do not run an evaluation callback against the same live world
+while the trainer is collecting a rollout.
 
-To inspect `JointGroupEffortController` without the safety adapter, launch with:
+## 10. Compare against your own ideal path or timed trajectory
+
+A geometric reference CSV uses `x_m,y_m,frame_id`. An actual trace uses
+`time_s,x_m,y_m,yaw_rad,frame_id`; yaw is optional. All coordinates must use the
+same frame. The automatically exported files already follow this format.
 
 ```bash
-ros2 launch nino_description sim.launch.py start_effort_drive:=false
+ros2 run nino_rl trajectory_metrics \
+  --actual rl_runs/ppo-p1/PPO_STAMP/episode-001/actual.csv \
+  --reference rl_runs/ppo-p1/PPO_STAMP/episode-001/reference.csv \
+  --mode path --output rl_runs/path-score.json --plot rl_runs/path-overlay.png
 ```
 
-Then publish to the controller directly:
+To compare with a scheduled ideal trajectory, give the reference a strictly
+increasing `time_s` column as well, then use `--mode timed --max-gap 0.5`.
+`position_rmse_m` compares interpolated positions at common simulation times;
+there is no timestamp shift, rigid alignment, or extrapolation. Clock origins
+must match. Exported time is relative to the first odometry sample; the episode
+metrics record `clock_origin_sim_s` for converting absolute simulator timestamps. Long gaps, duplicate timestamps and frame mismatches are rejected.
+Coverage is reported so an early-ending run cannot hide unobserved reference
+time. Choose the gap limit according to your sampling rate, not to conceal loss.
+
+A Nav2 path has no desired timestamps. Its default automatic score is therefore
+**path RMSE**, not timed position RMSE. Poses are wheel odometry transformed by
+localization, not external ground truth. For physical accuracy studies, export
+motion-capture or correctly transformed simulator ground-truth poses instead.
+Nearest-segment progress is ambiguous on self-crossing paths; use timed scoring
+for such experiments. Do not concatenate several episode clocks into one CSV.
+
+The scoring tools also work without ROS:
 
 ```bash
-ros2 topic pub --rate 20 /wheel_effort_controller/commands \
-  std_msgs/msg/Float64MultiArray "{data: [0.8, 0.8]}"
+PYTHONPATH=src/nino_rl python -m nino_rl.trajectory_metrics --help
 ```
 
-The raw interface bypasses the watchdog, torque ramp, and software speed guard;
-use it only with the robot restrained or for a short controller check. It holds
-its last received effort. Always send zero before stopping the raw publisher:
+## Troubleshooting and scope
 
-```bash
-ros2 topic pub --once /wheel_effort_controller/commands \
-  std_msgs/msg/Float64MultiArray "{data: [0.0, 0.0]}"
-```
+| Symptom | Action |
+|---|---|
+| `ensurepip` missing | Install `python3-venv`, recreate the incomplete venv |
+| Torch `+cpu` / CUDA false | Install the CUDA wheel in the same venv; check driver; run `check_cuda` |
+| Cannot import `rclpy` | Source Jazzy and use system Python 3.12 + `--system-site-packages` |
+| `ros2 run` cannot import Torch | Rebuild Python packages with active venv and `python -m colcon` |
+| Zero torque preflight | Use training launch, active effort controller, `accept_torque=True` |
+| IMU coverage timeout | Check `/clock`, `/imu/data` stamps and load; the bounded wait handles delivery races but does not fabricate samples |
+| Resume contract error | Use matching post-update run/config, or start a new run |
+| Missing map/odom TF | Wait for AMCL/Nav2 startup; do not compare poses in different frames |
 
-Limit the simulated wheel torque below the URDF maximum when launching:
-
-```bash
-ros2 launch nino_description sim.launch.py max_wheel_torque:=3.0
-```
-
-The hard URDF and ros2_control interface limit is `±12 N·m`. The default
-`/cmd_vel` speed loop is separately limited to `±2 N·m`; direct torque mode can
-use the full configured hardware limit. PI gains, acceleration limits, watchdog
-times, and odometry settings are kept in
-`src/nino_control/config/effort_drive.yaml`.
-
-Direct effort is slew-limited to `10 N·m/s`. A `12 rad/s` software wheel-speed
-guard removes torque that would accelerate an overspeed wheel, while allowing
-opposite braking torque. The URDF's `24 rad/s` emergency limit remains enabled
-as a final independent backstop.
-
-## Nav2 and Linorobot2 compatibility
-
-No Nav2 nodes are included or launched yet. The default simulation already
-provides the mobile-base interfaces Nav2 needs:
-
-- `/cmd_vel` — `geometry_msgs/msg/Twist`
-- `/odom` — `nav_msgs/msg/Odometry`
-- `odom -> base_footprint` TF
-- `base_footprint -> base_link` and wheel TF from `robot_state_publisher`
-
-Linorobot2's Jazzy EKF expects raw wheel odometry on `/odom/unfiltered` and
-publishes filtered `/odom` plus the odometry TF. Use:
-
-```bash
-ros2 launch nino_description sim.launch.py linorobot2_mode:=true
-```
-
-In this mode Nino publishes `/odom/unfiltered` and does not publish
-`odom -> base_footprint`, avoiding duplicate `/odom` publishers or TF sources
-when Linorobot2's `ekf_filter_node` runs. The IMU and lidar remain available on
-`/imu/data` and `/scan`. Use the `jazzy` branch of
-[Linorobot2](https://github.com/linorobot/linorobot2/tree/jazzy), select its 2WD
-base configuration, and keep its standard `cmd_vel`, `odom`,
-`base_footprint`, `base_link`, `imu_link`, and `laser` names.
-
-Start Nino in the Linorobot2-compatible mode:
-
-```bash
-ros2 launch nino_description sim.launch.py linorobot2_mode:=true rviz:=true sensor_monitor:=true
-```
-
-Then run Linorobot2's Jazzy EKF (from a terminal where Linorobot2 is built and
-sourced):
-
-```bash
-ros2 run robot_localization ekf_node --ros-args \
-  --params-file "$(ros2 pkg prefix --share linorobot2_base)/config/ekf.yaml" \
-  -p use_sim_time:=true -r odometry/filtered:=/odom
-```
-
-Do not run Linorobot2's full Gazebo launch at the same time as Nino's simulation;
-that launch creates another robot and another Gazebo instance. Run its EKF and
-navigation/SLAM nodes against Nino's standard topics instead.
-
-## Moving from Gazebo to Xiaomi CyberGear hardware
-
-`gz_ros2_control/GazeboSimSystem` is simulation-only. On the physical robot,
-replace that hardware plugin with a ros2_control `SystemInterface` that:
-
-1. Converts `left_wheel_joint/effort` and `right_wheel_joint/effort` from N·m
-   into CyberGear CAN torque commands.
-2. Reports measured joint position, velocity, and effort in SI units.
-3. Enforces the motor, gearbox, electrical, thermal, and emergency-stop limits
-   for the actual installation.
-
-The controller and high-level topic contract can remain unchanged, so
-`/cmd_vel`, direct torque commands, odometry, Linorobot2, and later Nav2 do not
-need to know whether the joint backend is Gazebo or CyberGear CAN hardware.
-
-## Physics and collision model
-
-The supplied CAD masses, centers of mass, and inertia tensors are retained.
-Left/right inertial and contact properties are symmetric; the effective wheel
-separation uses the measured tyre contact centers. The chassis collision uses
-the same `base_link.STL`, origin, and scale as its visual, so their surfaces are
-exactly aligned. Rolling surfaces use exact measured cylinders for stable
-contact. The caster bracket collision uses its CAD mesh in the same frame as
-the visual mesh, keeping the open fork clear.
-The modeled moving mass is `4.6888672492 kg`; its aggregate center of mass in
-`base_footprint` is approximately `[0.056018, 0.0, 0.127546] m`. Every inertia
-tensor is positive definite and satisfies the rigid-body triangle conditions.
-
-The default closed hall is 34 m long and 4 m wide. Its 29 cable bumps
-vary from 16–44 mm diameter and −22° to +24°. Every angled cable length is
-`4.0 / cos(angle)`, so it reaches both inner wall faces. A marked
-`1.30 x 1.00 m` area centered on `(0,0,0)` remains cable-free for deterministic
-spawning and resets; the nearest cable centers are at `x=-1.10 m` and
-`x=0.90 m`.
-# Ninobot_controlled_with_torque
-# Ninobot_controlled_with_torque
-# Ninobot_controlled_with_torque
-# Ninobot_controlled_with_torque
+This patch does not introduce SWAE, a 3D terrain map, an ESKF, Isaac Lab,
+asymmetric privileged critics, or unvalidated slope balancing. The existing
+optional terrain-preview input remains invalid/zero without a real producer.
+See the design note for the selection rationale and exact reward. Hardware
+transfer needs separate validation; the included simulator cannot establish it.

@@ -1,3 +1,6 @@
+> Historical revision. For the current reward, CUDA setup, metrics and training contract,
+> use [RL_IMPROVEMENTS.md](RL_IMPROVEMENTS.md) and the [root README](../../README.md).
+
 # Nino reward and history-policy update
 
 Patch base: `add_rl` at `0cb9de53c5b3e2f447a27a36087febd57209b168`.

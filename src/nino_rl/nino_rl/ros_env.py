@@ -23,6 +23,7 @@ from nino_rl.core import (
     wheel_slip_ratios,
 )
 from nino_rl.ros_interface import RosRobotInterface
+from nino_rl.trajectory_metrics import EpisodeTrajectory
 from nino_rl.control_v2 import (
     ACTION_SIZE, BASELINE_ACTION, ObservationHistory, StallWindow,
     make_observation, compute_reward, decode_action,
@@ -208,7 +209,14 @@ class NinoGazeboEnv(gym.Env):
             }
             return
 
-        uniform = lambda key: float(self.np_random.uniform(*cfg[key]))
+        phase = self._curriculum_stage()[0]
+        scales = cfg.get("phase_scales", [1.0] * 6)
+        if len(scales) != 6 or any(not 0.0 <= float(x) <= 1.0 for x in scales):
+            raise ValueError("domain_randomization.phase_scales needs six values in [0,1]")
+        intensity = float(scales[phase])
+        def uniform(key):
+            value = float(self.np_random.uniform(*cfg[key]))
+            return 1.0 + intensity * (value - 1.0) if key == "traction_scale" else intensity * value
         self._randomization = {
             "traction": uniform("traction_scale"),
             "delay": uniform("motor_delay_ms") / 1000.0,
@@ -326,6 +334,9 @@ class NinoGazeboEnv(gym.Env):
         self.max_abs_torque = 0.0
         self.accel_square_sum = 0.0
         truth = self.ros.snapshot()
+        frame, points = self._episode_nav_path or ("odom", self.path.points)
+        self.trajectory = EpisodeTrajectory(points, frame, truth.odom_stamp_s)
+        self.trajectory.add(0.0, *self.ros.pose_in_frame(truth, frame))
         self.previous_robot_state = deepcopy(truth)
         _, self.previous_tracking = make_observation(
             truth, self.path, self.lookahead, self.previous_action
@@ -347,11 +358,17 @@ class NinoGazeboEnv(gym.Env):
         reward_reference = self._reference(
             self.previous_tracking, started_sim - self.episode_started_sim)
         delay = min(self.control_dt * 0.8, self._randomization["delay"])
-        if delay > 0.0:
-            sleep(delay)
+        delay_deadline = monotonic() + self.config["policy_v2"]["simulation_step_wall_timeout_seconds"]
+        while self._sim_seconds() < started_sim + delay:
+            if monotonic() > delay_deadline:
+                self.ros.publish_control(0.0, 0.0, 0.0)
+                raise RuntimeError("Simulation clock paused during residual command delay")
+            sleep(0.002)
         torque *= self._randomization["traction"]
         torque += self.np_random.normal(0.0, self._randomization["torque_noise"], size=2)
         torque = np.clip(torque, -self.action_scale, self.action_scale)
+        if self.config.get("evaluation_baseline", False):
+            torque[:] = 0.0
         self.ros.publish_control(scale, float(torque[0]), float(torque[1]))
         deadline = monotonic() + self.config["policy_v2"]["simulation_step_wall_timeout_seconds"]
         while self._sim_seconds() < started_sim + self.control_dt:
@@ -361,11 +378,14 @@ class NinoGazeboEnv(gym.Env):
             sleep(0.002)
         ended_sim = self._sim_seconds()
         step_dt = ended_sim - started_sim
-        imu = self.ros.measure_impact(started_sim, ended_sim,
-            self.config["reward_v2"]["impact_acceleration_sigma_m_s2"])
-        if imu["duration"] < 0.8 * step_dt:
+        try:
+            imu = self.ros.wait_for_impact(started_sim, ended_sim,
+                self.config["reward_v2"]["impact_acceleration_sigma_m_s2"],
+                self.config["policy_v2"].get("imu_wait_timeout_seconds", 0.5),
+                self.config["policy_v2"].get("imu_min_coverage", 0.8))
+        except RuntimeError:
             self.ros.publish_control(0.0, 0.0, 0.0)
-            raise RuntimeError("Insufficient timestamped IMU coverage; inspect /imu/data and /clock")
+            raise
         self.vertical_square_integral += imu["square_integral"]
         self.imu_coverage_seconds += imu["duration"]
         self.peak_vertical_acceleration = max(self.peak_vertical_acceleration, imu["peak"])
@@ -391,6 +411,9 @@ class NinoGazeboEnv(gym.Env):
                 self.previous_action,
             )
         _, tracking = make_observation(truth, self.path, self.lookahead, action)
+        # Use the odometry message timestamp, not the end of an IMU wait.
+        self.trajectory.add(truth.odom_stamp_s - self.trajectory.clock_origin_sim_s,
+                            *self.ros.pose_in_frame(truth, self.trajectory.frame_id))
 
         reached_waypoints = 0
         waypoint_margin = 0.0
@@ -542,6 +565,9 @@ class NinoGazeboEnv(gym.Env):
             )
             count = max(1, self.episode_steps)
             info["episode_metrics"] = {
+                **self.trajectory.metrics(),
+                "trajectory_frame": self.trajectory.frame_id,
+                "trajectory_pose_source": "wheel_odom_transformed_by_localization",
                 **metrics_dict(tracking, truth, elapsed, succeeded),
                 "attempt": self.attempt_number,
                 "episode_start_time_unix": self.episode_start_time_unix,

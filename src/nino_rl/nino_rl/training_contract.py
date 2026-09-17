@@ -3,9 +3,8 @@ from copy import deepcopy
 
 
 def training_contract(config):
-    return {"revision": 3, **{key: deepcopy(config[key]) for key in (
-        "control_hz", "max_episode_seconds", "max_wheel_torque_nm",
-        "policy_v2", "reward_v2", "ppo")}}
+    return {"revision": 4, **{key: deepcopy(value) for key, value in config.items()
+            if key not in ("device", "seed", "curriculum", "terrain_curriculum", "reward")}}
 
 
 def validate_resume(model, config):

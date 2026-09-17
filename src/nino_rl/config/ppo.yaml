@@ -1,5 +1,5 @@
 seed: 42
-device: cpu
+device: cuda
 control_hz: 10.0
 max_episode_seconds: 120.0
 target_finish_seconds: 90.0
@@ -28,6 +28,8 @@ policy_v2:
   require_terrain_preview: false
   preview_timeout_seconds: 0.5
   simulation_step_wall_timeout_seconds: 10.0
+  imu_wait_timeout_seconds: 0.5
+  imu_min_coverage: 0.8
 
 reward_v2:
   progress_weight: 20.0
@@ -42,6 +44,8 @@ reward_v2:
   # Total post-limit PI + residual torque; 2.0 PI + 0.5 residual in this repo.
   applied_torque_scale_nm: 2.5
   effort_weight: 0.04
+  saturation_weight: 0.03
+  saturation_fraction: 0.90
   residual_effort_weight: 0.005
   torque_rate_weight: 0.02
   # Bounded negative kernels: no positive standing/survival bonus.
@@ -96,6 +100,11 @@ terrain_curriculum:
 
 domain_randomization:
   enabled: true
+  # Ramp perturbations with terrain phase. Evaluation can request full strength.
+  phase_scales: [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+  # Historical names: these affect the residual channel, NOT contact friction
+  # or the PI motor dynamics. Delay uses simulation time.
+
   traction_scale: [0.30, 1.00]
   motor_delay_ms: [10.0, 40.0]
   torque_noise_std_nm: [0.00, 0.12]

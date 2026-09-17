@@ -106,7 +106,8 @@ class ImuWindow:
             square += az * az * width
             fourth += min((abs(az) / sigma) ** 4, 81.0) * width
             peak = max(peak, abs(az))
-        return {"duration": duration, "square_integral": square,
+        return {"latest_stamp": values[-1][0] if values else -float("inf"),
+                "duration": duration, "square_integral": square,
                 "impact_integral": fourth, "peak": peak}
 
 
@@ -142,6 +143,8 @@ def compute_reward(previous, current, state, action, previous_action, torque,
     """
     if not np.isfinite(dt) or dt <= 0.0:
         raise ValueError("Reward requires positive simulation time")
+    if not 0.0 <= cfg.get("saturation_fraction", 0.9) < 1.0:
+        raise ValueError("saturation_fraction must be in [0, 1)")
     h = dt / 0.1
     cap = lambda x: min(float(x) ** 2, 9.0)
     delta = previous.distance_remaining - current.distance_remaining
@@ -184,6 +187,9 @@ def compute_reward(previous, current, state, action, previous_action, torque,
         "slip": -h * cfg["slip_weight"] * sum(cap(s / 0.30) for s in slip),
         "smoothness": -cfg["smoothness_weight"] * float(np.sum(
             (np.asarray(action) - np.asarray(previous_action)) ** 2)) / h,
+        "saturation": -h * cfg.get("saturation_weight", 0.0) * float(np.mean(
+            np.clip((np.abs(applied) / torque_scale - cfg.get("saturation_fraction", 0.9))
+                    / (1.0 - cfg.get("saturation_fraction", 0.9)), 0.0, 1.0) ** 2)),
         "effort": -h * cfg["effort_weight"] * float(np.mean((applied / torque_scale) ** 2)),
         "residual_effort": -h * cfg.get("residual_effort_weight", 0.0) * float(np.mean(
             (np.asarray(torque) / cfg["torque_scale_nm"]) ** 2)),

@@ -9,3 +9,4 @@ tensorboard>=2.9
 tqdm>=4.66
 rich>=13.0
 PyYAML>=6.0
+matplotlib>=3.8,<4.0

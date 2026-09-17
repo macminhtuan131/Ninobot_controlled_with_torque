@@ -52,7 +52,10 @@ def main() -> None:
     config = load_config(args.config)
     if args.phase is not None:
         config["curriculum"]["fixed_phase"] = args.phase
-    device = args.device or str(config.get("device", "cpu"))
+    # auto means CUDA for this GPU training workflow; never silently fall back.
+    device = args.device or str(config.get("device", "cuda"))
+    if device == "auto":
+        device = "cuda"
     if device.startswith("cuda") and not th.cuda.is_available():
         raise SystemExit(
             "Cấu hình yêu cầu CUDA nhưng torch.cuda.is_available() = False. "
@@ -101,6 +104,10 @@ def main() -> None:
                         "mean_abs_lateral_error_m",
                         "rms_path_deviation_m",
                         "max_path_deviation_m",
+                        "path_rmse_m",
+                        "path_p95_m",
+                        "heading_rmse_deg",
+                        "final_progress_fraction",
                         "max_tilt_deg",
                         "rms_wheel_slip",
                         "rms_wheel_torque_nm",
@@ -121,7 +128,7 @@ def main() -> None:
                 if values:
                     self.logger.record(f"reward_terms/{name}", float(np.mean(values)))
 
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     run_dir = args.output.expanduser().resolve() / stamp
     checkpoint_dir = run_dir / "checkpoints"
     tensorboard_dir = run_dir / "tensorboard"
@@ -131,6 +138,14 @@ def main() -> None:
     with (run_dir / "ppo.yaml").open("w") as stream:
         yaml.safe_dump(config, stream, sort_keys=False)
 
+    import json
+    import platform
+    from importlib.metadata import version
+    (run_dir / "run_metadata.json").write_text(json.dumps({
+        "argv": sys.argv, "python": platform.python_version(), "device": device,
+        "gpu": th.cuda.get_device_name(0) if device.startswith("cuda") else None,
+        "packages": {name: version(name) for name in ("torch", "stable-baselines3", "gymnasium", "numpy")},
+    }, indent=2) + "\n")
     env = NinoGazeboEnv(config, total_training_steps=args.timesteps)
     try:
         if args.check_env:
@@ -188,6 +203,12 @@ def main() -> None:
         final_path = run_dir / "nino_ppo_final"
         model.save(final_path)
         print(f"Đã lưu policy: {final_path}.zip")
+    except (KeyboardInterrupt, RuntimeError):
+        if "model" in locals():
+            interrupted = run_dir / "nino_ppo_interrupted"
+            model.save(interrupted)
+            print(f"Saved {interrupted}.zip; unfinished rollout is discarded on resume.")
+        raise
     finally:
         env.close()
 

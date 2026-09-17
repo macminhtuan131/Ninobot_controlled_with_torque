@@ -81,7 +81,7 @@ class PathTracker:
         index = int(np.argmin(np.sum(errors * errors, axis=1)))
         tangent = self.delta[index] / self.lengths[index]
         cross = tangent[0] * errors[index, 1] - tangent[1] * errors[index, 0]
-        lateral = float(np.copysign(np.linalg.norm(errors[index]), cross)) if abs(cross) > 1e-12 else 0.0
+        lateral = float(cross)  # signed perpendicular error; endpoint distance is separate
         path_s = float(self.cumulative[index] + fractions[index] * self.lengths[index])
         heading = atan2(float(tangent[1]), float(tangent[0]))
         return path_s, lateral, heading, projections[index]
@@ -144,6 +144,7 @@ def catmull_rom_path(
 
 @dataclass
 class RobotState:
+    odom_stamp_s: float = 0.0
     x: float = 0.0
     y: float = 0.0
     yaw: float = 0.0

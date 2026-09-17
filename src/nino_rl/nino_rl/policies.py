@@ -1,4 +1,4 @@
-"""Small CPU-friendly history policy with the existing 300-in/3-out contract."""
+"""Compact CUDA-capable history policy with the existing 300-in/3-out contract."""
 import torch as th
 from torch import nn
 from stable_baselines3.common.policies import ActorCriticPolicy

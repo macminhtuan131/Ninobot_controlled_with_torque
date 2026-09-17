@@ -10,6 +10,7 @@ import unittest
 import numpy as np
 import yaml
 
+from nino_rl.trajectory_metrics import EpisodeTrajectory
 from nino_rl.core import RobotState, PathTracker, TrackingState, NavReference, goal_reached, is_wrong_direction, metrics_dict, wheel_slip_ratios
 from nino_rl.control_v2 import (
     BASELINE_ACTION, STOP_ACTION, FRAME_SIZE, ImuWindow, ObservationHistory,
@@ -190,7 +191,7 @@ class TestActuator(unittest.TestCase):
 
 
 class TestEnvironmentContract(unittest.TestCase):
-    def run_step(self, collision=False, timed_out=False, torque_fresh=True):
+    def run_step(self, collision=False, timed_out=False, torque_fresh=True, baseline=False, torque_noise=0.):
         source = ROOT / "src/nino_rl/nino_rl/ros_env.py"
         cls = next(x for x in ast.parse(source.read_text()).body if isinstance(x, ast.ClassDef))
         step = next(x for x in cls.body if isinstance(x, ast.FunctionDef) and x.name == "step")
@@ -204,7 +205,7 @@ class TestEnvironmentContract(unittest.TestCase):
             goal_reached=goal_reached, is_wrong_direction=is_wrong_direction,
             metrics_dict=metrics_dict, wheel_slip_ratios=wheel_slip_ratios)
         exec(compile(ast.Module(body=[step], type_ignores=[]), str(source), "exec"), namespace)
-        state = RobotState(x=.02, accel_z=9.80665,
+        state = RobotState(odom_stamp_s=.1, x=.02, accel_z=9.80665,
                            lidar_ranges=[.05 if collision else 3.0])
         path = PathTracker([(0, 0), (30, 0)])
         history = ObservationHistory(5)
@@ -214,12 +215,13 @@ class TestEnvironmentContract(unittest.TestCase):
             publish_control=lambda *args: commands.append(args),
             snapshot=lambda: state, ground_truth_ready=lambda: True,
             applied_torque_ready=lambda: torque_fresh,
+            pose_in_frame=lambda s, frame: (s.x, s.y, s.yaw),
             nav_path_in_odom=lambda _: None,
-            measure_impact=lambda start, end, sigma: dict(duration=end-start,
+            wait_for_impact=lambda start, end, sigma, *args: dict(duration=end-start,
                 square_integral=0., impact_integral=0., peak=0.),
             get_logger=lambda: SimpleNamespace(warn=lambda _: None))
         env = SimpleNamespace(config=deepcopy(CONFIG), action_scale=.5, control_dt=.1,
-            _randomization={"delay": 0., "traction": 1., "torque_noise": 0.},
+            _randomization={"delay": 0., "traction": 1., "torque_noise": torque_noise},
             _sim_seconds=lambda: clock[0], ros=ros, episode_steps=0, global_steps=0,
             episode_started_sim=1., episode_start_time_unix=0.,
             np_random=np.random.default_rng(42), _episode_nav_path=None,
@@ -232,6 +234,7 @@ class TestEnvironmentContract(unittest.TestCase):
             _reference=lambda *args: reference, _noisy_state=lambda truth: truth,
             _actor_observation=lambda truth, action, ref: make_observation(
                 truth, path, CONFIG["path"]["lookahead_m"], action, ref)[0],
+            trajectory=EpisodeTrajectory([(0, 0), (30, 0)], "odom"),
             history=history, _curriculum_stage=lambda: (0, 0., 30), stall_window=StallWindow(),
             off_path_steps=0, off_path_seconds=0., nav_invalid_steps=0, nav_invalid_seconds=0.,
             wrong_direction_steps=0, wrong_direction_seconds=0., attempt_number=1)
@@ -241,6 +244,8 @@ class TestEnvironmentContract(unittest.TestCase):
                     "max_tilt_deg", "max_path_deviation", "slip_square_sum", "max_abs_slip",
                     "torque_square_sum", "max_abs_torque", "accel_square_sum"):
             setattr(env, key, 0.)
+        env.config["evaluation_baseline"] = baseline
+        env.trajectory.add(0.0, 0.0, 0.0, 0.0)
         if timed_out:
             env.config["max_episode_seconds"] = .05
         return namespace["step"](env, BASELINE_ACTION.copy()), commands
@@ -268,6 +273,12 @@ class TestEnvironmentContract(unittest.TestCase):
         self.assertEqual(info["reward_terms"]["terminal"], -50)
         self.assertEqual(info["episode_metrics"]["termination"], "timeout")
         self.assertEqual(commands[-1], (0., 0., 0.))
+
+    def test_randomized_baseline_never_receives_residual_noise(self):
+        _, commands = self.run_step(baseline=True, torque_noise=.12)
+        self.assertEqual(commands[0], (1., 0., 0.))
+        _, rl_commands = self.run_step(baseline=False, torque_noise=.12)
+        self.assertNotEqual(rl_commands[0][1:], (0., 0.))
 
     def test_missing_effort_feedback_aborts(self):
         with self.assertRaisesRegex(RuntimeError, "torque feedback stale"):
