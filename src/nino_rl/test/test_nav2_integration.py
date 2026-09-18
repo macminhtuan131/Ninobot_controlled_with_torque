@@ -1,11 +1,193 @@
 import ast
 from pathlib import Path
+from threading import Lock
+from types import SimpleNamespace
 import xml.etree.ElementTree as ET
 
 import yaml
 
+from nino_rl.ros_interface import RosRobotInterface
+from nino_rl.control_v2 import ImuWindow
+from nino_rl.core import RobotState
+
 
 ROOT = Path(__file__).parents[3]
+
+
+def test_lockstep_accepts_lost_service_response_only_after_clock_proof():
+    class Future:
+        @staticmethod
+        def done():
+            return False
+
+    removed = []
+    warnings = []
+    ros = SimpleNamespace(
+        _lock=Lock(),
+        _sim_clock_stamp=1.0,
+        physics_step_seconds=0.002,
+        world_control=SimpleNamespace(
+            wait_for_service=lambda timeout_sec: True,
+            call_async=lambda request: Future(),
+            remove_pending_request=lambda future: removed.append(future),
+        ),
+        get_logger=lambda: SimpleNamespace(warn=warnings.append),
+    )
+
+    def lose_response_after_executing(_future, _timeout):
+        ros._sim_clock_stamp = 1.05
+        raise TimeoutError("lost response")
+
+    ros._wait_future = lose_response_after_executing
+    result = RosRobotInterface.advance_world(ros, 25, timeout=0.1)
+    assert result == 0.05
+    assert len(removed) == 1
+    assert "clock confirms" in warnings[0]
+
+
+def test_lockstep_accepts_quiescent_near_complete_clock_interval():
+    class Future:
+        @staticmethod
+        def done():
+            return False
+
+    removed = []
+    warnings = []
+    ros = SimpleNamespace(
+        _lock=Lock(),
+        _sim_clock_stamp=1.0,
+        physics_step_seconds=0.002,
+        world_control=SimpleNamespace(
+            wait_for_service=lambda timeout_sec: True,
+            call_async=lambda request: Future(),
+            remove_pending_request=lambda future: removed.append(future),
+        ),
+        get_logger=lambda: SimpleNamespace(warn=warnings.append),
+    )
+
+    def lose_response_after_partial_clock_delivery(_future, _timeout):
+        ros._sim_clock_stamp = 1.046
+        raise TimeoutError("lost response")
+
+    ros._wait_future = lose_response_after_partial_clock_delivery
+    ros.wait_for_clock_quiescence = lambda timeout, quiet_time: ros._sim_clock_stamp
+    result = RosRobotInterface.advance_world(ros, 25, timeout=0.1)
+    assert result == 0.05
+    assert len(removed) == 1
+    assert "near-complete atomic chunk" in warnings[0]
+
+
+def test_pause_accepts_lost_response_when_clock_confirms_state():
+    class Future:
+        @staticmethod
+        def done():
+            return False
+
+    removed = []
+    warnings = []
+    ros = SimpleNamespace(
+        _lock=Lock(),
+        _sim_clock_stamp=1.0,
+        physics_step_seconds=0.002,
+        world_control=SimpleNamespace(
+            wait_for_service=lambda timeout_sec: True,
+            call_async=lambda request: Future(),
+            remove_pending_request=lambda future: removed.append(future),
+        ),
+        get_logger=lambda: SimpleNamespace(warn=warnings.append),
+        _wait_future=lambda future, timeout: (_ for _ in ()).throw(
+            TimeoutError("lost response")
+        ),
+        wait_for_clock_quiescence=lambda timeout, quiet_time: 1.0,
+    )
+
+    RosRobotInterface.set_world_paused(ros, True, timeout=0.2)
+    assert len(removed) == 1
+    assert "confirms paused=True" in warnings[0]
+
+
+def test_unpause_accepts_lost_response_when_clock_advances():
+    class Future:
+        @staticmethod
+        def done():
+            return False
+
+    removed = []
+    warnings = []
+    ros = SimpleNamespace(
+        _lock=Lock(),
+        _sim_clock_stamp=1.0,
+        physics_step_seconds=0.002,
+        world_control=SimpleNamespace(
+            wait_for_service=lambda timeout_sec: True,
+            call_async=lambda request: Future(),
+            remove_pending_request=lambda future: removed.append(future),
+        ),
+        get_logger=lambda: SimpleNamespace(warn=warnings.append),
+    )
+
+    def lose_response_after_unpausing(_future, _timeout):
+        ros._sim_clock_stamp = 1.01
+        raise TimeoutError("lost response")
+
+    ros._wait_future = lose_response_after_unpausing
+    RosRobotInterface.set_world_paused(ros, False, timeout=0.2)
+    assert len(removed) == 1
+    assert "confirms paused=False" in warnings[0]
+
+
+def test_lockstep_epoch_uses_timestamp_boundary_not_imu_queue_silence():
+    ros = SimpleNamespace(
+        _lock=Lock(),
+        _sim_clock_stamp=10.0,
+        physics_step_seconds=0.002,
+        _imu_epoch_min_stamp=-float("inf"),
+        imu_window=ImuWindow(),
+        _received={"imu", "clock"},
+        _received_at={"imu": 1.0, "clock": 1.0},
+    )
+    ros.imu_window.add(9.99, 2.0)
+    ros.wait_for_clock_quiescence = lambda timeout: ros._sim_clock_stamp
+
+    def advance(steps, timeout):
+        ros._sim_clock_stamp += steps * ros.physics_step_seconds
+
+    ros.advance_world = advance
+    result = RosRobotInterface.begin_lockstep_epoch(ros, timeout=0.2)
+    assert result == 10.002
+    assert ros._imu_epoch_min_stamp == 10.0
+    assert not ros.imu_window.samples
+    assert "imu" not in ros._received
+
+
+def test_imu_callback_discards_packets_at_or_before_epoch_boundary():
+    received = []
+    ros = SimpleNamespace(
+        _lock=Lock(),
+        _state=RobotState(accel_z=1.0),
+        _imu_epoch_min_stamp=10.0,
+        imu_window=ImuWindow(),
+        imu_includes_gravity=True,
+        _mark_received=received.append,
+    )
+
+    def message(stamp, accel_z):
+        return SimpleNamespace(
+            header=SimpleNamespace(stamp=SimpleNamespace(
+                sec=int(stamp), nanosec=int(round((stamp % 1.0) * 1e9))
+            )),
+            orientation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0),
+            angular_velocity=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+            linear_acceleration=SimpleNamespace(x=0.0, y=0.0, z=accel_z),
+        )
+
+    RosRobotInterface._imu_callback(ros, message(10.0, 99.0))
+    assert ros._state.accel_z == 1.0
+    assert not ros.imu_window.samples
+    RosRobotInterface._imu_callback(ros, message(10.01, 9.80665))
+    assert ros._state.accel_z == 9.80665
+    assert ros.imu_window.samples[-1][0] == 10.01
+    assert received == ["imu"]
 
 
 def test_linorobot2_source_and_legacy_maps_are_merged():
@@ -44,6 +226,28 @@ def test_training_uses_direct_straight_baseline_plus_rl_residual_torque():
     assert "navigation.launch.py" not in baseline
     assert "linorobot2_navigation" not in training
     assert "linorobot2_navigation" not in baseline
+    assert '"ROS_DOMAIN_ID"' in training
+    assert '"ROS_AUTOMATIC_DISCOVERY_RANGE"' in training
+
+
+def test_nino_python_tools_force_the_same_local_isolated_ros_domain():
+    package_init = (
+        ROOT / "src" / "nino_rl" / "nino_rl" / "__init__.py"
+    ).read_text()
+    simulator = (
+        ROOT / "src" / "nino_description" / "launch" / "sim.launch.py"
+    ).read_text()
+    for text in (package_init, simulator):
+        assert '"NINO_ROS_DOMAIN_ID", "77"' in text
+        assert '"ROS_AUTOMATIC_DISCOVERY_RANGE"' in text
+
+
+def test_episode_reset_requires_fresh_ground_truth_but_not_fresh_lidar():
+    source = (ROOT / "src" / "nino_rl" / "nino_rl" / "ros_env.py").read_text()
+    reset = source[source.index("    def reset("):source.index("    def step(")]
+    assert 'sensor_markers(["ground_truth"])' in reset
+    assert "wait_for_sensor_updates" in reset
+    assert 'sensor_markers(["scan"])' not in reset
 
 
 def test_six_phase_curriculum_and_straight_goal_are_configured():
@@ -66,7 +270,9 @@ def test_six_phase_curriculum_and_straight_goal_are_configured():
     assert config["navigation"]["goal_pose"][0] - cable_x == 2.0
     assert config["navigation"]["cmd_vel_topic"] == "/cmd_vel"
     assert config["navigation"]["straight_speed_m_s"] == 0.75
-    assert config["goal_tolerance_m"] == 0.01
+    assert config["goal_tolerance_m"] == 0.003
+    assert config["goal_capture_on_crossing"] is True
+    assert config["goal_require_stopped"] is False
     control_period = 1.0 / config["control_hz"]
     physics_step = config["policy_v2"]["simulation_physics_step_seconds"]
     assert control_period / physics_step == 50
@@ -103,6 +309,14 @@ def test_goal_marker_is_visible_but_has_no_collision_geometry():
     root = ET.fromstring(namespace["_goal_marker_sdf"]("training_goal_marker"))
     assert len(root.findall(".//visual")) == 3
     assert root.find(".//collision") is None
+
+    configure = next(
+        node for node in interface.body
+        if isinstance(node, ast.FunctionDef) and node.name == "configure_goal_marker"
+    )
+    configure_source = ast.unparse(configure)
+    assert "SetEntityPose.Request" in configure_source
+    assert "DeleteEntity.Request" not in configure_source
 
 
 def test_adaptive_terrain_sdf_contains_all_three_feature_types():

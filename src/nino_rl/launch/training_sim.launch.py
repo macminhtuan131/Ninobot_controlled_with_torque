@@ -1,9 +1,12 @@
 """Start Nino and the direct straight-line RL training interfaces."""
 
+import os
+
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
     IncludeLaunchDescription,
+    SetEnvironmentVariable,
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
@@ -48,6 +51,10 @@ def generate_launch_description():
     )
     return LaunchDescription(
         [
+            SetEnvironmentVariable(
+                "ROS_DOMAIN_ID", os.environ.get("NINO_ROS_DOMAIN_ID", "77")
+            ),
+            SetEnvironmentVariable("ROS_AUTOMATIC_DISCOVERY_RANGE", "LOCALHOST"),
             DeclareLaunchArgument(
                 "headless", default_value="true", description="Disable Gazebo GUI while training"
             ),

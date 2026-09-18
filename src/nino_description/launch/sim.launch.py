@@ -1,5 +1,6 @@
 """Spawn Nino at world origin in Gazebo Sim and bridge its ROS interfaces."""
 
+import os
 from pathlib import Path
 
 from launch import LaunchDescription
@@ -217,6 +218,10 @@ def generate_launch_description():
             default_value="false",
             description="Print live IMU, encoder, and lidar summaries",
         ),
+        SetEnvironmentVariable(
+            "ROS_DOMAIN_ID", os.environ.get("NINO_ROS_DOMAIN_ID", "77")
+        ),
+        SetEnvironmentVariable("ROS_AUTOMATIC_DISCOVERY_RANGE", "LOCALHOST"),
         SetEnvironmentVariable(
             "GZ_SIM_RESOURCE_PATH",
             [

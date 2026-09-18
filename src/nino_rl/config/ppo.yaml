@@ -4,13 +4,16 @@ control_hz: 10.0
 max_episode_seconds: 20.0
 target_finish_seconds: 15.0
 max_wheel_torque_nm: 2.0
-goal_tolerance_m: 0.01
-# If the robot center crosses beyond the goal plane without meeting all goal
-# conditions, end the episode immediately instead of letting it drive away.
-goal_overshoot_tolerance_m: 0.0
+goal_tolerance_m: 0.003
+# A 10 Hz controller can move several centimetres between samples. Count the
+# first valid crossing of the endpoint plane so it cannot skip a 3 mm target.
+goal_capture_on_crossing: true
+goal_require_stopped: false
+# Reaching or crossing the goal plane is success. Final position and heading
+# accuracy are graded by reward_v2 instead of changing success into failure.
 goal_lateral_tolerance_m: 0.25
 goal_heading_tolerance_deg: 12.0
-goal_max_speed_m_s: 0.05
+goal_max_speed_m_s: 0.10
 goal_max_yaw_rate_rad_s: 0.30
 goal_max_tilt_deg: 10.0
 wrong_direction_heading_deg: 90.0
@@ -32,10 +35,17 @@ policy_v2:
   require_terrain_preview: false
   preview_timeout_seconds: 0.5
   simulation_step_wall_timeout_seconds: 10.0
+  # If a world-control reply is lost and BEST_EFFORT /clock exposes most but
+  # not all of a chunk, score the verified elapsed simulation time instead of
+  # aborting. Smaller advances still indicate a real simulator failure.
+  lockstep_min_completion_fraction: 0.80
   # Matches long_hall.sdf. 50 steps per 10 Hz action keeps cable contacts
   # stable while halving the physics cost of the original 1 ms setting.
   simulation_physics_step_seconds: 0.002
   sensor_wait_timeout_seconds: 2.0
+  # Cap conservative collision-distance extrapolation for the asynchronous
+  # BEST_EFFORT GPU LiDAR. Transport freshness is checked separately.
+  lidar_max_lag_seconds: 0.25
   imu_wait_timeout_seconds: 0.5
   imu_min_coverage: 0.8
   # Trajectory learning must not abort because Gazebo defers an IMU publisher
@@ -49,8 +59,14 @@ policy_v2:
 
 reward_v2:
   progress_weight: 20.0
-  lateral_weight: 0.8
-  heading_weight: 0.2
+  # Straight-path tracking dominates small comfort/effort savings. Forward
+  # progress is additionally gated by alignment in compute_reward().
+  progress_lateral_sigma_m: 0.25
+  progress_heading_sigma_rad: 0.35
+  lateral_weight: 4.0
+  lateral_sigma_m: 0.10
+  heading_weight: 2.0
+  heading_sigma_rad: 0.174533
   impact_weight: 0.05
   impact_acceleration_sigma_m_s2: 2.0
   body_rate_weight: 0.05
@@ -77,9 +93,18 @@ reward_v2:
   time_penalty: 0.01
   stall_penalty: 0.5
   success_bonus: 100.0
+  # A reached goal always receives the success bonus, then loses points
+  # smoothly for endpoint position and heading error.
+  success_position_penalty: 30.0
+  success_position_sigma_m: 0.25
+  success_heading_penalty: 20.0
+  success_heading_sigma_rad: 0.20944
   failure_penalty: 100.0
   off_path_penalty: 75.0
   timeout_penalty: 50.0
+  # A timeout near the endpoint is better than making no progress, but still
+  # receives no +100 success bonus unless all arrival conditions are met.
+  timeout_completion_scaling: true
 
 path:
   lookahead_m: [0.5, 1.0, 2.0, 3.5, 5.0, 7.5, 10.0, 12.5, 15.0]
@@ -117,11 +142,11 @@ terrain_curriculum:
   # Larger diameter and greater skew are treated as harder. The sign of a
   # nonzero angle is randomized per episode to avoid a left/right wheel bias.
   phases_hard_to_easy:
-    - {name: hardest, diameter_m: 0.030, angle_deg: 45.0}
-    - {name: very_hard, diameter_m: 0.025, angle_deg: 36.0}
-    - {name: hard, diameter_m: 0.020, angle_deg: 27.0}
-    - {name: medium, diameter_m: 0.015, angle_deg: 18.0}
-    - {name: easy, diameter_m: 0.010, angle_deg: 9.0}
+    - {name: hardest, diameter_m: 0.015, angle_deg: 45.0}
+    - {name: very_hard, diameter_m: 0.013, angle_deg: 36.0}
+    - {name: hard, diameter_m: 0.011, angle_deg: 27.0}
+    - {name: medium, diameter_m: 0.009, angle_deg: 18.0}
+    - {name: easy, diameter_m: 0.007, angle_deg: 9.0}
     - {name: easiest, diameter_m: 0.005, angle_deg: 0.0}
 
 # Success-driven clutter around the main cable. One feature is added after

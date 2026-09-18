@@ -75,9 +75,9 @@ Distances are metres; angles radians. Coefficients are initial tuning values.
 
 | Term | Definition |
 |---|---|
-| progress | 20 clip(previous_remaining - remaining, -0.1, 0.1) |
-| lateral | -0.8 h C(lateral_error / 0.30) |
-| heading | -0.2 h C(heading_error / 0.35) |
+| progress | +20 delta-progress, gated by straight-line position/heading alignment |
+| lateral | -4.0 h C(lateral_error / 0.10) |
+| heading | -2.0 h C(heading_error / 0.174533) |
 | impact | -0.05 impact_scale integral(min((a_world_z/2)^4,81) dt) / 0.1 |
 | body_rate | -0.05 h [C(gyro_x) + C(gyro_y)] |
 | attitude | -0.5 h [C(max(abs(roll)-0.20,0)/0.15) + C(max(abs(pitch)-0.30,0)/0.15)] |
@@ -154,8 +154,8 @@ friction/mass randomizer. Use different seeds for final reporting than tuning.
 Manual curriculum gate: consider advancing only after >=90% held-out success
 and acceptable path/impact metrics on the current phase. No automatic claim of
 optimality is made. All phases contain one cable at the same position. In the
-requested hard-to-easy order, phase 1 is 44 mm at 45 degrees and phases 2–6 are
-38/36, 32/27, 26/18, 20/9, and 12/0 (diameter in mm / absolute angle in degrees).
+requested hard-to-easy order, phase 1 is 15 mm at 45 degrees and phases 2–6 are
+13/36, 11/27, 9/18, 7/9, and 5/0 (diameter in mm / absolute angle in degrees).
 The angle sign is randomized. Resume a v2 model with `--phase 2`, etc.;
 `--timesteps` is ADDITIONAL steps when resuming. Each evaluation episode also
 writes `trajectory.png`, overlaying the expected and robot trajectories.

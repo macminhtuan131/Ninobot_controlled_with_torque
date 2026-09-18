@@ -303,7 +303,7 @@ def test_reward_prefers_stable_imu_and_desired_direction():
     assert stable_terms["direction"] > unstable_terms["direction"]
 
 
-def test_goal_requires_endpoint_accuracy_low_motion_and_low_tilt():
+def test_goal_completion_depends_on_reaching_endpoint_not_arrival_quality():
     config = {
         "goal_tolerance_m": 0.45,
         "goal_lateral_tolerance_m": 0.25,
@@ -323,10 +323,27 @@ def test_goal_requires_endpoint_accuracy_low_motion_and_low_tilt():
     assert not goal_reached(
         TrackingState(30.0, 0.1, 0.0, 0.0, 1.0), settled, config
     )
-    assert not goal_reached(accurate, RobotState(linear_velocity=0.5), config)
-    assert not goal_reached(
+    assert goal_reached(accurate, RobotState(linear_velocity=0.5), config)
+    assert goal_reached(
         accurate, RobotState(roll=np.deg2rad(15.0)), config
     )
+
+
+def test_goal_plane_capture_cannot_skip_three_millimetre_target():
+    config = {
+        "goal_tolerance_m": 0.003,
+        "goal_capture_on_crossing": True,
+        "goal_require_stopped": False,
+        "goal_lateral_tolerance_m": 0.25,
+        "goal_heading_tolerance_deg": 12.0,
+        "goal_max_speed_m_s": 0.10,
+        "goal_max_yaw_rate_rad_s": 0.30,
+        "goal_max_tilt_deg": 10.0,
+    }
+    crossed = TrackingState(30.0, 0.02, np.deg2rad(2.0), 0.0, 0.05)
+    assert goal_reached(crossed, RobotState(linear_velocity=0.5), config)
+    crossed_laterally = TrackingState(30.0, 0.30, 0.0, 0.0, 0.30)
+    assert goal_reached(crossed_laterally, RobotState(), config)
 
 
 def test_reward_adds_more_points_for_earlier_finish():

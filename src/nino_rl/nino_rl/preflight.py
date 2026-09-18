@@ -37,6 +37,9 @@ def run_preflight(config: dict, timeout: float = 30.0) -> list[str]:
         node_name="nino_rl_preflight",
         cmd_vel_topic=str(nav.get("cmd_vel_topic", "/cmd_vel")),
         imu_topic=str(config["policy_v2"].get("imu_topic", "/imu/data")),
+        physics_step_seconds=float(
+            config["policy_v2"].get("simulation_physics_step_seconds", 0.002)
+        ),
     )
     executor = MultiThreadedExecutor(num_threads=2)
     executor.add_node(node)
@@ -52,12 +55,23 @@ def run_preflight(config: dict, timeout: float = 30.0) -> list[str]:
     try:
         node.set_world_paused(False, timeout=timeout)
         node.wait_for_sensors(timeout)
+        clock_publishers = node.get_publishers_info_by_topic("/clock")
+        if len(clock_publishers) != 1:
+            publishers = ", ".join(
+                f"{item.node_namespace}{item.node_name}"
+                for item in clock_publishers
+            ) or "none"
+            raise RuntimeError(
+                "Training requires exactly one /clock publisher; found "
+                f"{len(clock_publishers)} ({publishers}). Stop other ROS/Gazebo "
+                "graphs and restart training_sim with the Nino isolated domain."
+            )
         node.configure_training_cables([], timeout=timeout)
         start = tuple(float(v) for v in nav["start_pose"])
         goal = tuple(float(v) for v in nav["goal_pose"])
         node.reset_episode(timeout=timeout, start_pose=start)
         state = node.snapshot()
-        passed.append("1 robot spawned and sensor graph is connected")
+        passed.append("1 robot spawned; sensor graph has one isolated clock")
 
         if not all(isfinite(value) for value in (
             state.orientation_x, state.orientation_y, state.orientation_z,
@@ -137,14 +151,29 @@ def run_preflight(config: dict, timeout: float = 30.0) -> list[str]:
                 f"(left={max_left_change:.3f}, right={max_right_change:.3f} rad/s)"
             )
         passed.append("2 both wheel joints rotate under bounded v2 residual torque")
-        passed.append("12 RL residual interface physically controls both wheels")
+        # Training immediately switches from the running preflight world to
+        # paused, service-driven stepping. Exercise that exact transition so
+        # a stale or overloaded ControlWorld bridge cannot pass preflight and
+        # then fail on the first Gym reset.
+        lockstep_timeout = float(
+            config["policy_v2"].get(
+                "simulation_step_wall_timeout_seconds", timeout
+            )
+        )
+        node.set_world_paused(True, timeout=lockstep_timeout)
+        node.begin_lockstep_epoch(timeout=lockstep_timeout)
+        node.set_world_paused(False, timeout=lockstep_timeout)
+        passed.append(
+            "12 RL residual and lockstep interfaces physically control the world"
+        )
         return sorted(passed, key=lambda value: int(value.split()[0]))
     finally:
         try:
             node.publish_straight_command(0.0)
             node.publish_control(0.0, 0.0, 0.0)
             node.publish_torque(0.0, 0.0)
-        except RuntimeError:
+            node.set_world_paused(False, timeout=min(timeout, 5.0))
+        except (RuntimeError, TimeoutError):
             pass
         stop.set()
         thread.join(timeout=2.0)

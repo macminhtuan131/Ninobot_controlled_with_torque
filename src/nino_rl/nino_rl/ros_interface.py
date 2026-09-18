@@ -59,6 +59,7 @@ class RosRobotInterface(Node):
         nav_cmd_topic: str = "/cmd_vel_nav",
         cmd_vel_topic: str = "/cmd_vel",
         imu_topic: str = "/imu/data",
+        physics_step_seconds: float = 0.002,
     ) -> None:
         super().__init__(
             node_name,
@@ -70,6 +71,7 @@ class RosRobotInterface(Node):
         self._state = RobotState()
         self.imu_includes_gravity = True
         self.imu_window = ImuWindow()
+        self._imu_epoch_min_stamp = -float("inf")
         self._sim_clock_stamp = None
         self._preview = (0.0, 0.0, 0.0)
         self._preview_received_at = -float("inf")
@@ -79,6 +81,9 @@ class RosRobotInterface(Node):
         self._desired_twist = (0.0, 0.0)
         self._nav_goal_handle = None
         self.world_name = world_name
+        if not isfinite(physics_step_seconds) or physics_step_seconds <= 0.0:
+            raise ValueError("physics_step_seconds must be positive and finite")
+        self.physics_step_seconds = float(physics_step_seconds)
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
@@ -180,6 +185,7 @@ class RosRobotInterface(Node):
             self._mark_received("clock")
 
     def _imu_callback(self, message: Imu) -> None:
+        stamp = message.header.stamp.sec + message.header.stamp.nanosec * 1e-9
         quaternion = message.orientation
         norm = sqrt(
             quaternion.x * quaternion.x
@@ -200,6 +206,11 @@ class RosRobotInterface(Node):
             *orientation
         )
         with self._lock:
+            # After an episode reset, DDS may continue delivering queued IMU
+            # samples generated before the paused epoch boundary. Ignore the
+            # whole sample, including actor state, based on simulation time.
+            if stamp <= self._imu_epoch_min_stamp:
+                return
             self._state.roll = roll
             self._state.pitch = pitch
             self._state.orientation_x = float(orientation[0])
@@ -212,7 +223,6 @@ class RosRobotInterface(Node):
             self._state.accel_x = float(message.linear_acceleration.x)
             self._state.accel_y = float(message.linear_acceleration.y)
             self._state.accel_z = float(message.linear_acceleration.z)
-            stamp = message.header.stamp.sec + message.header.stamp.nanosec * 1e-9
             self.imu_window.add(stamp, vertical_acceleration(
                 self._state, self.imu_includes_gravity))
             self._mark_received("imu")
@@ -228,6 +238,9 @@ class RosRobotInterface(Node):
 
     def _scan_callback(self, message: LaserScan) -> None:
         with self._lock:
+            self._state.lidar_stamp_s = (
+                message.header.stamp.sec + message.header.stamp.nanosec * 1e-9
+            )
             self._state.lidar_ranges = tuple(float(value) for value in message.ranges)
             self._state.lidar_range_max = float(message.range_max)
             self._mark_received("scan")
@@ -312,13 +325,27 @@ class RosRobotInterface(Node):
             self._mark_received("straight_cmd")
 
     def straight_reference_valid(self, stale_after: float = 2.0) -> bool:
-        """Return whether sensors and the direct straight command are fresh."""
+        """Return whether the state needed by the straight controller is fresh.
+
+        LiDAR is deliberately excluded.  Gazebo's GPU ray sensor is an
+        asynchronous, BEST_EFFORT safety aid and must not invalidate the
+        wheel/odometry reference when rendering briefly falls behind.
+        """
         now = monotonic()
         with self._lock:
             return all(
                 name in self._received_at
                 and now - self._received_at[name] <= stale_after
-                for name in ("odom", "imu", "joint", "scan", "straight_cmd")
+                for name in ("odom", "imu", "joint", "straight_cmd")
+            )
+
+    def sensor_stream_ready(self, name: str, stale_after: float = 2.0) -> bool:
+        """Return whether a named stream has delivered a recent DDS sample."""
+        now = monotonic()
+        with self._lock:
+            return (
+                name in self._received_at
+                and now - self._received_at[name] <= stale_after
             )
 
     def navigation_valid(self, stale_after: float = 2.0) -> bool:
@@ -408,19 +435,6 @@ class RosRobotInterface(Node):
         with self._lock:
             return self.imu_window.estimate(start, end, sigma)
 
-    def latest_imu_stamp(self):
-        with self._lock:
-            if not self.imu_window.samples:
-                raise RuntimeError("No timestamped IMU sample is available")
-            return self.imu_window.samples[-1][0]
-
-    def wait_for_imu_quiescence(self, timeout=2.0, quiet_time=0.05):
-        """Drain queued IMU callbacks after pausing before choosing time zero."""
-        from nino_rl.timing import wait_for_quiescent_timestamp
-        return wait_for_quiescent_timestamp(
-            self.latest_imu_stamp, timeout, quiet_time
-        )
-
     def latest_clock_stamp(self):
         with self._lock:
             if self._sim_clock_stamp is None:
@@ -437,31 +451,34 @@ class RosRobotInterface(Node):
     def begin_lockstep_epoch(self, timeout=2.0):
         """Discard pre-reset timing callbacks and establish a fresh epoch.
 
-        Gazebo model reset and DDS delivery are asynchronous. A clock or IMU
-        message generated just before reset can otherwise arrive after pause
-        and put the inferred action window ahead of the simulator. The single
+        Gazebo model reset and DDS delivery are asynchronous. Queued IMU
+        messages are rejected by their simulation timestamp rather than by
+        waiting for a high-rate callback queue to become silent. The single
         flush step is episode setup overhead, not per-action overhead.
         """
-        self.wait_for_imu_quiescence(timeout=timeout)
-        self.wait_for_clock_quiescence(timeout=timeout)
+        paused_clock = self.wait_for_clock_quiescence(timeout=timeout)
         with self._lock:
             self.imu_window.samples.clear()
-            self._sim_clock_stamp = None
-            for name in ("imu", "clock"):
-                self._received.discard(name)
-                self._received_at.pop(name, None)
+            self._imu_epoch_min_stamp = paused_clock
+            self._received.discard("imu")
+            self._received_at.pop("imu", None)
 
         self.advance_world(1, timeout=timeout)
+        target = paused_clock + self.physics_step_seconds
         deadline = monotonic() + timeout
         while monotonic() < deadline:
             with self._lock:
-                ready = self._sim_clock_stamp is not None
+                clock = self._sim_clock_stamp
+                ready = (
+                    clock is not None
+                    and clock >= target - 0.5 * self.physics_step_seconds
+                )
             if ready:
                 break
             sleep(0.002)
         else:
             raise RuntimeError(
-                "No fresh /clock sample after lockstep epoch flush"
+                "No post-boundary /clock sample after lockstep epoch flush"
             )
 
         return self.wait_for_clock_quiescence(timeout=timeout)
@@ -546,33 +563,192 @@ class RosRobotInterface(Node):
             sleep(0.05)
 
     def set_world_paused(self, paused, timeout=5.0):
+        """Set pause state with idempotent retries and independent clock proof.
+
+        ros_gz_bridge may drop a response after Gazebo has executed the
+        request. Reissuing the same pause state is safe, unlike reissuing a
+        multi-step request. A missing response is accepted when /clock proves
+        the requested state was reached.
+        """
         if not self.world_control.wait_for_service(timeout_sec=timeout):
             raise RuntimeError("Missing world control bridge for PPO pause/resume")
-        request = ControlWorld.Request()
-        request.world_control.pause = bool(paused)
-        result = self._wait_future(self.world_control.call_async(request), timeout)
-        if not result.success:
-            raise RuntimeError("Gazebo rejected pause/resume request")
+        attempts = 3
+        last_error = None
+        for attempt in range(1, attempts + 1):
+            request = ControlWorld.Request()
+            request.world_control.pause = bool(paused)
+            with self._lock:
+                clock_before = self._sim_clock_stamp
+            future = self.world_control.call_async(request)
+            try:
+                result = self._wait_future(future, timeout)
+            except TimeoutError as error:
+                last_error = error
+                if not future.done():
+                    try:
+                        self.world_control.remove_pending_request(future)
+                    except RuntimeError:
+                        pass
 
-    def advance_world(self, physics_steps, timeout=5.0):
-        """Advance a paused Gazebo world by an exact number of physics steps."""
+                confirmed = False
+                if paused:
+                    try:
+                        self.wait_for_clock_quiescence(
+                            timeout=min(2.0, max(0.2, timeout)),
+                            quiet_time=0.10,
+                        )
+                        confirmed = True
+                    except (RuntimeError, ValueError):
+                        pass
+                elif clock_before is not None:
+                    deadline = monotonic() + min(2.0, max(0.2, timeout))
+                    while monotonic() < deadline:
+                        with self._lock:
+                            clock_after = self._sim_clock_stamp
+                        if (
+                            clock_after is not None
+                            and clock_after
+                            > clock_before + 0.5 * self.physics_step_seconds
+                        ):
+                            confirmed = True
+                            break
+                        sleep(0.002)
+
+                if confirmed:
+                    self.get_logger().warn(
+                        "World pause/resume response timed out, but /clock "
+                        f"confirms paused={bool(paused)}"
+                    )
+                    return
+                self.get_logger().warn(
+                    "World pause/resume response timed out without clock "
+                    f"confirmation; retry {attempt}/{attempts}"
+                )
+                continue
+
+            if result is not None and result.success:
+                if not paused:
+                    return
+                try:
+                    self.wait_for_clock_quiescence(
+                        timeout=min(2.0, max(0.2, timeout)),
+                        quiet_time=0.10,
+                    )
+                    return
+                except (RuntimeError, ValueError) as error:
+                    last_error = error
+                    self.get_logger().warn(
+                        "Gazebo accepted pause but /clock is still advancing; "
+                        f"retry {attempt}/{attempts}"
+                    )
+                    continue
+            last_error = RuntimeError("Gazebo rejected pause/resume request")
+            self.get_logger().warn(
+                f"Gazebo rejected pause={bool(paused)}; retry {attempt}/{attempts}"
+            )
+
+        raise RuntimeError(
+            f"Could not establish Gazebo paused={bool(paused)} after "
+            f"{attempts} idempotent attempts"
+        ) from last_error
+
+    def advance_world(
+        self, physics_steps, timeout=5.0, min_completion_fraction=0.80
+    ):
+        """Advance a paused world and return the credited simulation duration.
+
+        The Gazebo multi_step command is atomic. /clock is used only as
+        independent evidence because its depth-1 BEST_EFFORT bridge can omit
+        the last samples; raw callback timestamps must not redefine the fixed
+        policy interval.
+        """
         if not isinstance(physics_steps, int) or physics_steps < 1:
             raise ValueError("physics_steps must be a positive integer")
+        if not 0.0 < min_completion_fraction <= 1.0:
+            raise ValueError("min_completion_fraction must be in (0, 1]")
         if not self.world_control.wait_for_service(timeout_sec=timeout):
             raise RuntimeError("Missing world control bridge for lockstep training")
         request = ControlWorld.Request()
         request.world_control.pause = True
         request.world_control.multi_step = physics_steps
-        result = self._wait_future(self.world_control.call_async(request), timeout)
+        with self._lock:
+            clock_before = self._sim_clock_stamp
+        if clock_before is None:
+            raise RuntimeError("Cannot step Gazebo without a /clock baseline")
+        requested_duration = physics_steps * self.physics_step_seconds
+        target = clock_before + requested_duration
+        future = self.world_control.call_async(request)
+        try:
+            result = self._wait_future(future, timeout)
+        except TimeoutError as error:
+            # ros_gz_bridge can lose or delay the service response after Gazebo
+            # has already executed the atomic multi_step request. Never retry
+            # blindly: that would advance the policy interval twice. Accept
+            # only when /clock independently proves every requested step ran.
+            grace_deadline = monotonic() + min(2.0, max(0.1, 0.2 * timeout))
+            clock_after = clock_before
+            while monotonic() < grace_deadline:
+                with self._lock:
+                    if self._sim_clock_stamp is not None:
+                        clock_after = self._sim_clock_stamp
+                if clock_after >= target - 0.5 * self.physics_step_seconds:
+                    if not future.done():
+                        self.world_control.remove_pending_request(future)
+                    self.get_logger().warn(
+                        "World-control response timed out, but /clock confirms "
+                        f"all {physics_steps} requested physics steps completed"
+                    )
+                    return requested_duration
+                sleep(0.002)
+
+            # A depth-1 BEST_EFFORT /clock subscription can miss the final
+            # samples even though the request has stopped with the world
+            # paused. Once the clock is quiescent, accept a near-complete
+            # interval and let the environment score its observed duration.
+            clock_quiescent = False
+            try:
+                clock_after = self.wait_for_clock_quiescence(
+                    timeout=min(2.0, max(0.2, timeout)), quiet_time=0.10
+                )
+                clock_quiescent = True
+            except (RuntimeError, ValueError):
+                pass
+            advanced = max(0.0, clock_after - clock_before)
+            if (
+                clock_quiescent
+                and advanced >= min_completion_fraction * requested_duration
+            ):
+                if not future.done():
+                    try:
+                        self.world_control.remove_pending_request(future)
+                    except RuntimeError:
+                        pass
+                self.get_logger().warn(
+                    "World-control response timed out; /clock verified a "
+                    f"paused near-complete atomic chunk "
+                    f"{advanced:.6f}/{requested_duration:.6f}s"
+                )
+                return requested_duration
+            raise TimeoutError(
+                "World-control response timed out and verified progress was "
+                "below the safe completion threshold "
+                f"(before={clock_before:.6f}, after={clock_after:.6f}, "
+                f"target={target:.6f}, minimum_fraction="
+                f"{min_completion_fraction:.3f})"
+            ) from error
         if not result.success:
             raise RuntimeError("Gazebo rejected lockstep physics request")
+        return requested_duration
 
     def reset_drive_state(self, timeout=5.0):
         """Reset wheel odometry and release any stale v2 command ownership."""
         if not self.reset_odometry.wait_for_service(timeout_sec=timeout):
             raise TimeoutError("Missing /reset_wheel_odometry from effort_drive")
-        response = self._wait_future(
-            self.reset_odometry.call_async(Trigger.Request()), timeout
+        response = self._call_idempotent_service(
+            self.reset_odometry,
+            Trigger.Request,
+            timeout,
+            "wheel odometry reset",
         )
         if response is None or not response.success:
             message = response.message if response is not None else "no response"
@@ -589,6 +765,31 @@ class RosRobotInterface(Node):
                 return future.result()
             sleep(0.01)
         raise TimeoutError("ROS service call timed out")
+
+    def _call_idempotent_service(
+        self, client, request_factory, timeout: float, operation: str,
+        attempts: int = 3,
+    ):
+        """Retry a state-setting service whose duplicate execution is safe."""
+        last_error = None
+        for attempt in range(1, attempts + 1):
+            future = client.call_async(request_factory())
+            try:
+                return self._wait_future(future, timeout)
+            except TimeoutError as error:
+                last_error = error
+                if not future.done():
+                    try:
+                        client.remove_pending_request(future)
+                    except RuntimeError:
+                        pass
+                self.get_logger().warn(
+                    f"{operation} response timed out; retry "
+                    f"{attempt}/{attempts}"
+                )
+        raise TimeoutError(
+            f"{operation} timed out after {attempts} idempotent attempts"
+        ) from last_error
 
     def _clear_navigation_observations(self) -> None:
         """Discard plan/cmd observations belonging to the previous episode."""
@@ -931,9 +1132,11 @@ class RosRobotInterface(Node):
         request = ControlWorld.Request()
         request.world_control.reset.model_only = True
 
-        response = self._wait_future(
-            self.world_control.call_async(request),
+        response = self._call_idempotent_service(
+            self.world_control,
+            lambda: deepcopy(request),
             timeout,
+            "Gazebo model reset",
         )
 
         if response is None or not response.success:
@@ -964,9 +1167,11 @@ class RosRobotInterface(Node):
             0.5 * float(start_pose[2])
         )
 
-        response = self._wait_future(
-            self.set_entity_pose.call_async(pose_request),
+        response = self._call_idempotent_service(
+            self.set_entity_pose,
+            lambda: deepcopy(pose_request),
             timeout,
+            "Nino start-pose reset",
         )
 
         if response is None or not response.success:
@@ -1049,10 +1254,14 @@ class RosRobotInterface(Node):
         terrain_names = {"cable_bumps", *[f"training_cable_{i}" for i in range(8)]}
 
         def remove_if_present(name):
-            request = DeleteEntity.Request()
-            request.entity.name = name
-            request.entity.type = Entity.MODEL
-            response = self._wait_future(self.delete_entity.call_async(request), timeout)
+            def request():
+                value = DeleteEntity.Request()
+                value.entity.name = name
+                value.entity.type = Entity.MODEL
+                return value
+            response = self._call_idempotent_service(
+                self.delete_entity, request, timeout, f"delete {name}"
+            )
             # Gazebo reports success=False when the entity is already absent;
             # that is the desired postcondition for an idempotent reset.
             return response is not None and response.success
@@ -1069,14 +1278,19 @@ class RosRobotInterface(Node):
         for index, (x, radius, angle) in enumerate(cables):
             name = f"training_cable_{index}"
             request = self._cable_spawn_request(name, x, radius, angle)
-            response = self._wait_future(self.spawn_entity.call_async(request), timeout)
+            response = self._call_idempotent_service(
+                self.spawn_entity, lambda: deepcopy(request), timeout, f"spawn {name}"
+            )
             if response is None or not response.success:
                 # A prior asynchronous removal may have raced the first create.
                 # Remove this exact name once more and retry with a fresh request.
                 remove_if_present(name)
                 request = self._cable_spawn_request(name, x, radius, angle)
-                response = self._wait_future(
-                    self.spawn_entity.call_async(request), timeout
+                response = self._call_idempotent_service(
+                    self.spawn_entity,
+                    lambda: deepcopy(request),
+                    timeout,
+                    f"spawn {name} after removal",
                 )
                 if response is None or not response.success:
                     raise RuntimeError(f"Gazebo failed to spawn {name} after retry")
@@ -1103,18 +1317,30 @@ class RosRobotInterface(Node):
     def configure_goal_marker(
         self, goal_pose: tuple[float, float, float], timeout: float = 5.0
     ) -> None:
-        """Place a non-colliding Gazebo marker at the configured goal."""
+        """Create the goal marker once, then move it without visual gaps."""
         name = "training_goal_marker"
-        if not self.delete_entity.wait_for_service(timeout_sec=timeout):
-            raise TimeoutError(f"Missing {self.delete_entity.srv_name}")
 
-        def remove_if_present() -> None:
-            request = DeleteEntity.Request()
+        def pose_request():
+            request = SetEntityPose.Request()
             request.entity.name = name
             request.entity.type = Entity.MODEL
-            self._wait_future(self.delete_entity.call_async(request), timeout)
+            request.pose.position.x = float(goal_pose[0])
+            request.pose.position.y = float(goal_pose[1])
+            request.pose.orientation.z = sin(0.5 * float(goal_pose[2]))
+            request.pose.orientation.w = cos(0.5 * float(goal_pose[2]))
+            return request
 
-        remove_if_present()
+        if not self.set_entity_pose.wait_for_service(timeout_sec=timeout):
+            raise TimeoutError(f"Missing {self.set_entity_pose.srv_name}")
+        response = self._call_idempotent_service(
+            self.set_entity_pose,
+            pose_request,
+            timeout,
+            "move goal marker",
+        )
+        if response is not None and response.success:
+            return
+
         if not self.spawn_entity.wait_for_service(timeout_sec=timeout):
             raise TimeoutError(f"Missing {self.spawn_entity.srv_name}")
 
@@ -1129,16 +1355,24 @@ class RosRobotInterface(Node):
             request.entity_factory.pose.orientation.w = cos(0.5 * float(goal_pose[2]))
             return request
 
-        response = self._wait_future(
-            self.spawn_entity.call_async(spawn_request()), timeout
+        response = self._call_idempotent_service(
+            self.spawn_entity,
+            spawn_request,
+            timeout,
+            "create goal marker",
         )
         if response is None or not response.success:
-            remove_if_present()
-            response = self._wait_future(
-                self.spawn_entity.call_async(spawn_request()), timeout
+            # Another asynchronous caller may have created the fixed-name
+            # marker between set_pose and create. Moving it is idempotent and
+            # avoids the delete/recreate interval that made it disappear.
+            response = self._call_idempotent_service(
+                self.set_entity_pose,
+                pose_request,
+                timeout,
+                "move goal marker after create race",
             )
             if response is None or not response.success:
-                raise RuntimeError("Gazebo failed to spawn the visual goal marker")
+                raise RuntimeError("Gazebo failed to create or move the visual goal marker")
 
     @staticmethod
     def _adaptive_terrain_sdf(
@@ -1205,10 +1439,14 @@ class RosRobotInterface(Node):
             raise TimeoutError(f"Missing {self.delete_entity.srv_name}")
 
         def remove_if_present() -> None:
-            request = DeleteEntity.Request()
-            request.entity.name = name
-            request.entity.type = Entity.MODEL
-            self._wait_future(self.delete_entity.call_async(request), timeout)
+            def request():
+                value = DeleteEntity.Request()
+                value.entity.name = name
+                value.entity.type = Entity.MODEL
+                return value
+            self._call_idempotent_service(
+                self.delete_entity, request, timeout, f"delete {name}"
+            )
 
         remove_if_present()
         if not features:
@@ -1223,13 +1461,19 @@ class RosRobotInterface(Node):
             request.entity_factory.sdf = self._adaptive_terrain_sdf(name, features)
             return request
 
-        response = self._wait_future(
-            self.spawn_entity.call_async(spawn_request()), timeout
+        response = self._call_idempotent_service(
+            self.spawn_entity,
+            spawn_request,
+            timeout,
+            f"spawn {name}",
         )
         if response is None or not response.success:
             remove_if_present()
-            response = self._wait_future(
-                self.spawn_entity.call_async(spawn_request()), timeout
+            response = self._call_idempotent_service(
+                self.spawn_entity,
+                spawn_request,
+                timeout,
+                f"spawn {name} after removal",
             )
             if response is None or not response.success:
                 raise RuntimeError("Gazebo failed to spawn adaptive training terrain")

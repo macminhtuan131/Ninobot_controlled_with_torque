@@ -170,7 +170,8 @@ class StallWindow:
 def compute_reward(previous, current, state, action, previous_action, torque,
                    dt, imu, cfg, *, succeeded=False, failed=None,
                    timed_out=False, stalled=False, impact_scale=1.0,
-                   reference=None, previous_state=None):
+                   reference=None, previous_state=None,
+                   completion_fraction=0.0):
     """AMR reward with v2 I/O; see REWARD_POLICY_UPDATE.md for the objective.
 
     Tracking uses an unscaled pre-action baseline reference and simulation truth
@@ -185,6 +186,17 @@ def compute_reward(previous, current, state, action, previous_action, torque,
     h = dt / 0.1
     cap = lambda x: min(float(x) ** 2, 9.0)
     delta = previous.distance_remaining - current.distance_remaining
+    # Credit forward motion fully only when it follows the straight
+    # centerline. Reverse motion retains its full penalty so this gate cannot
+    # be exploited by driving back while misaligned.
+    progress_quality = exp(-(
+        current.lateral_error / cfg.get("progress_lateral_sigma_m", 0.25)
+    ) ** 2) * exp(-(
+        current.heading_error / cfg.get("progress_heading_sigma_rad", 0.35)
+    ) ** 2)
+    credited_progress = float(delta) * (
+        progress_quality if delta > 0.0 else 1.0
+    )
     slip = wheel_slip_ratios(state)
     applied = np.asarray([state.applied_left_torque, state.applied_right_torque])
     torque_scale = float(cfg.get("applied_torque_scale_nm", cfg["torque_scale_nm"]))
@@ -213,9 +225,13 @@ def compute_reward(previous, current, state, action, previous_action, torque,
     terms = {
         # No asymmetric clipping across a closed forward/backward path: raw
         # signed differences telescope for a fixed path (undiscounted).
-        "progress": cfg["progress_weight"] * float(delta),
-        "lateral": -h * cfg["lateral_weight"] * cap(current.lateral_error / 0.30),
-        "heading": -h * cfg["heading_weight"] * cap(current.heading_error / 0.35),
+        "progress": cfg["progress_weight"] * credited_progress,
+        "lateral": -h * cfg["lateral_weight"] * cap(
+            current.lateral_error / cfg.get("lateral_sigma_m", 0.30)
+        ),
+        "heading": -h * cfg["heading_weight"] * cap(
+            current.heading_error / cfg.get("heading_sigma_rad", 0.35)
+        ),
         "impact": -impact_scale * cfg["impact_weight"] * imu["impact_integral"] / 0.1,
         "body_rate": -h * cfg["body_rate_weight"] * (cap(state.gyro_x) + cap(state.gyro_y)),
         "attitude": -h * cfg["attitude_weight"] * (
@@ -238,6 +254,8 @@ def compute_reward(previous, current, state, action, previous_action, torque,
             + cap(state.ground_yaw_rate / cfg.get("goal_yaw_sigma_rad_s", 0.30))),
         "time": -h * cfg["time_penalty"],
         "stall": -h * cfg["stall_penalty"] if stalled else 0.0,
+        "success_position": 0.0,
+        "success_heading": 0.0,
         "terminal": 0.0,
     }
     # Failure has precedence, including at a goal or time limit.
@@ -245,8 +263,24 @@ def compute_reward(previous, current, state, action, previous_action, torque,
         terms["terminal"] = -cfg["off_path_penalty"] if failed == "off_path" else -cfg["failure_penalty"]
     elif succeeded:
         terms["terminal"] = cfg["success_bonus"]
+        terms["success_position"] = -cfg.get(
+            "success_position_penalty", 0.0
+        ) * kernel_cost(
+            current.endpoint_distance,
+            cfg.get("success_position_sigma_m", 0.25),
+        )
+        terms["success_heading"] = -cfg.get(
+            "success_heading_penalty", 0.0
+        ) * kernel_cost(
+            current.heading_error,
+            cfg.get("success_heading_sigma_rad", 0.21),
+        )
     elif timed_out:
-        terms["terminal"] = -cfg["timeout_penalty"]
+        completion = float(np.clip(completion_fraction, 0.0, 1.0))
+        remaining = 1.0 - completion if cfg.get(
+            "timeout_completion_scaling", False
+        ) else 1.0
+        terms["terminal"] = -cfg["timeout_penalty"] * remaining
     reward = float(sum(terms.values()))
     if not np.isfinite(reward):
         raise ValueError("Non-finite v2 reward")

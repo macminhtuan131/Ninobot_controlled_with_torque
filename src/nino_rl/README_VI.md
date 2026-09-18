@@ -23,8 +23,8 @@ không áp dụng công thức ZMP dành cho con lắc ngược hoặc giả đ�
 9. Dừng trainer, giữ simulation; đánh giá baseline và PPO **lần lượt**, cùng
    phase, config, số episode và seed. Xem success trước rồi mới xem RMSE.
 10. Sáu phase đều có một dây cáp, xếp từ khó đến dễ theo
-    đường kính/góc: 44 mm/45°, 38/36°, 32/27°, 26/18°,
-    20/9° và 12/0°. Phase sau tiếp tục từ checkpoint phase trước.
+    đường kính/góc: 15 mm/45°, 13/36°, 11/27°, 9/18°,
+    7/9° và 5/0°. Phase sau tiếp tục từ checkpoint phase trước.
 
 Mỗi terminal mới cần:
 

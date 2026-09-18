@@ -6,20 +6,30 @@ casters, IMU, wheel encoders and **2D** LiDAR. It is not an unsupported two-whee
 inverted pendulum. Nav2 is disabled for this experiment. The pipeline is a
 direct straight `/cmd_vel` reference → wheel-speed PI + bounded PPO residuals
 → effort controller. PPO also scales the forward velocity reference.
+The PPO policy supplies the steering correction normally associated with a
+geometric tracker: differential wheel residuals must keep cross-track and
+heading error near zero before forward progress receives full credit, including
+while crossing the configured cable bump.
 
 The updated workflow uses NVIDIA CUDA by default and refuses an automatic CPU
 fallback. Gazebo physics and ROS still consume CPU; this is one Gazebo world,
 not GPU-parallel Isaac Lab simulation. Keep only one train/evaluate/policy
 process connected to that world at a time.
 
+Nino simulation processes automatically use ROS domain 77 with localhost-only
+discovery, preventing another machine or simulator from injecting a conflicting
+`/clock`. To use manual `ros2 topic` or `ros2 service` diagnostics, first run
+`export ROS_DOMAIN_ID=${NINO_ROS_DOMAIN_ID:-77}` and
+`export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST` in that shell.
+
 - [Reward, policy and engineering decisions](src/nino_rl/RL_IMPROVEMENTS.md)
 - [Vietnamese quick guide](src/nino_rl/README_VI.md)
+- [Bài viết nghiên cứu tổng quan bằng tiếng Việt](docs/BAO_CAO_NGHIEN_CUU_RL_NINO.md)
 - [Simulation and hardware reference](docs/HARDWARE_REFERENCE.md)
 
-Start a **new training run** after applying this update: reward, timing and
-terrain/control semantics have changed (training contract revision 9). Earlier
-300-input/3-action checkpoints remain structurally usable for inference, but
-cannot be resumed into this training contract. Old 54-input/2-action models are
+The current training contract is revision 21. Its validator can migrate only
+the explicitly supported v2 revisions 9–20 when their saved configuration
+matches; otherwise start a new run. Old 54-input/2-action models are
 incompatible. No pretrained weights or measured performance gains are included.
 
 ## 1. Prepare Ubuntu and the NVIDIA GPU
@@ -162,7 +172,7 @@ source install/setup.bash
 Set the endpoint and forward controller in `src/nino_rl/config/ppo.yaml`:
 
 ```yaml
-goal_tolerance_m: 0.01
+goal_tolerance_m: 0.003
 navigation:
   start_pose: [0.0, 0.0, 0.0]
   goal_pose: [6.0, 0.0, 0.0]
@@ -171,17 +181,17 @@ navigation:
   goal_slowdown_distance_m: 1.00
 ```
 
-The robot is successful only when its endpoint distance is at most 1 cm and
-the other configured arrival safety checks pass. The direct command always has
+The robot is successful when it reaches the 3 mm endpoint region or crosses
+the goal plane. The success reward is reduced smoothly by final position and
+heading error, so inaccurate arrivals still score less without becoming an
+overshoot failure. The direct command always has
 `angular.z = 0`; the residual policy may apply differential wheel correction to
 counter drift while following the straight reference. The curriculum cable is
 at `x=4 m`, leaving 2 m for recovery and drift measurement before the 6 m goal.
 With `headless:=false`, Gazebo displays the goal as a bright green disc, pole,
 and flag. The marker is visual-only and cannot collide with the robot or LiDAR.
 
-If the robot crosses the goal plane without meeting the 1 cm/low-speed arrival
-criteria, the episode ends immediately as `goal_overshoot` and the next episode
-starts. After each successful episode, one extra side feature is added near the
+After each successful episode, one extra side feature is added near the
 cable zone, cycling through pothole-like rough patches, obstacles, and short
 cables until 20 are present. A ±0.60 m center corridor always remains clear.
 
@@ -249,7 +259,7 @@ CUDA memory usage alone is not evidence of successful learning.
 
 A Ctrl-C or runtime transport failure saves `nino_ppo_interrupted.zip` if a
 model exists; its unfinished rollout is discarded on resume. Fix the transport
-problem before continuing. Resume only revision-9 runs with their saved config:
+problem before continuing. Resume only compatible v2 runs with their saved config:
 
 ```bash
 ros2 run nino_rl train --device cuda --phase 1 --timesteps 500000 \
@@ -310,12 +320,12 @@ nonzero angle is randomized so the policy does not favor one wheel.
 
 | Phase | Difficulty | Diameter | Absolute angle |
 |---|---|---:|---:|
-| 1 | Hardest | 44 mm | 45 degrees |
-| 2 | Very hard | 38 mm | 36 degrees |
-| 3 | Hard | 32 mm | 27 degrees |
-| 4 | Medium | 26 mm | 18 degrees |
-| 5 | Easy | 20 mm | 9 degrees |
-| 6 | Easiest | 12 mm | 0 degrees |
+| 1 | Hardest | 15 mm | 45 degrees |
+| 2 | Very hard | 13 mm | 36 degrees |
+| 3 | Hard | 11 mm | 27 degrees |
+| 4 | Medium | 9 mm | 18 degrees |
+| 5 | Easy | 7 mm | 9 degrees |
+| 6 | Easiest | 5 mm | 0 degrees |
 
 Domain randomization is disabled by default so the phase comparison is based
 only on size and angle. Use `--randomized` during evaluation only when you

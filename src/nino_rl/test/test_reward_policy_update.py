@@ -83,6 +83,23 @@ class RewardTests(unittest.TestCase):
             total += terms["progress"]
         self.assertAlmostEqual(total, 0.)
 
+    def test_forward_progress_is_credited_most_on_the_straight_centerline(self):
+        previous = TrackingState(0, 0, 0, 6.0, 6.0)
+        cfg = {**CONFIG["reward_v2"], "torque_scale_nm": .5}
+
+        def progress(lateral, heading):
+            current = TrackingState(.1, lateral, heading, 5.9, 5.9)
+            _, terms = compute_reward(
+                previous, current, RobotState(), BASELINE_ACTION,
+                BASELINE_ACTION, [0., 0.], .1,
+                {"impact_integral": 0.}, cfg,
+            )
+            return terms["progress"]
+
+        centered = progress(0.0, 0.0)
+        self.assertGreater(centered, progress(0.20, 0.0))
+        self.assertGreater(centered, progress(0.0, np.deg2rad(20.0)))
+
     def test_rate_cost_matches_linear_ramp_when_step_is_subdivided(self):
         cfg = {**CONFIG["reward_v2"], "torque_scale_nm": .5}
         tracking = TrackingState(0, 0, 0, 30, 30)
@@ -112,6 +129,19 @@ class RewardTests(unittest.TestCase):
             validate_resume(model, changed)
         with self.assertRaisesRegex(ValueError, "NEW run"):
             validate_resume(SimpleNamespace(), CONFIG)
+
+    def test_revision_9_checkpoint_migrates_only_lidar_transport_fix(self):
+        legacy = training_contract(CONFIG)
+        legacy["revision"] = 9
+        del legacy["policy_v2"]["lidar_max_lag_seconds"]
+        model = SimpleNamespace(nino_training_contract=legacy)
+        validate_resume(model, CONFIG)
+        self.assertEqual(model.nino_training_contract, training_contract(CONFIG))
+
+        incompatible = deepcopy(legacy)
+        incompatible["reward_v2"]["progress_weight"] += 1.0
+        with self.assertRaisesRegex(ValueError, "NEW run"):
+            validate_resume(SimpleNamespace(nino_training_contract=incompatible), CONFIG)
 
 
 try:

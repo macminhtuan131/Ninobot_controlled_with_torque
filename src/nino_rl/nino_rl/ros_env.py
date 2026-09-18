@@ -42,9 +42,22 @@ class NinoGazeboEnv(gym.Env):
         self.world_paused_for_update = False
         self.total_training_steps = max(1, int(total_training_steps))
         self.control_dt = 1.0 / float(config["control_hz"])
+        self.sensor_timeout = float(config["sensor_timeout_seconds"])
         self.physics_dt = float(
             config["policy_v2"].get("simulation_physics_step_seconds", 0.005)
         )
+        self.simulation_step_timeout = float(
+            config["policy_v2"].get(
+                "simulation_step_wall_timeout_seconds", self.sensor_timeout
+            )
+        )
+        if self.simulation_step_timeout <= 0.0:
+            raise ValueError("simulation step wall timeout must be positive")
+        self.lockstep_min_completion_fraction = float(
+            config["policy_v2"].get("lockstep_min_completion_fraction", 0.80)
+        )
+        if not 0.0 < self.lockstep_min_completion_fraction <= 1.0:
+            raise ValueError("lockstep_min_completion_fraction must be in (0, 1]")
         step_ratio = self.control_dt / self.physics_dt
         self.physics_steps_per_control = int(round(step_ratio))
         if (self.physics_dt <= 0.0 or self.physics_steps_per_control < 1
@@ -56,7 +69,6 @@ class NinoGazeboEnv(gym.Env):
         self.max_steps = int(float(config["max_episode_seconds"]) / self.control_dt)
         self.action_scale = float(config["max_wheel_torque_nm"])
         self.lookahead = list(config["path"]["lookahead_m"])
-        self.sensor_timeout = float(config["sensor_timeout_seconds"])
         self.history = ObservationHistory(config["policy_v2"]["history_frames"])
         self.action_space = spaces.Box(-1.0, 1.0, shape=(ACTION_SIZE,), dtype=np.float32)
         self.observation_space = spaces.Box(
@@ -96,6 +108,7 @@ class NinoGazeboEnv(gym.Env):
             subscribe_plan=False,
             cmd_vel_topic=str(navigation.get("cmd_vel_topic", "/cmd_vel")),
             imu_topic=str(config["policy_v2"].get("imu_topic", "/imu/data")),
+            physics_step_seconds=self.physics_dt,
         )
         self.ros.imu_includes_gravity = bool(config["policy_v2"]["imu_includes_gravity"])
         self.executor = MultiThreadedExecutor(num_threads=2)
@@ -202,7 +215,7 @@ class NinoGazeboEnv(gym.Env):
         return PathTracker(np.linspace(start, goal, sample_count))
 
     def _straight_command(self, endpoint_distance: float) -> float:
-        """Slow smoothly near the endpoint so the 1 cm goal is attainable."""
+        """Slow smoothly near the endpoint so the 3 mm goal is attainable."""
         tolerance = float(self.config["goal_tolerance_m"])
         remaining = max(0.0, float(endpoint_distance) - tolerance)
         fraction = np.clip(
@@ -272,12 +285,6 @@ class NinoGazeboEnv(gym.Env):
             )
             features.append((kind, float(x), float(y), float(size)))
         return features
-
-    def _past_goal_distance(self, state: RobotState) -> float:
-        """Signed distance beyond the endpoint plane along the final segment."""
-        direction = self.path.points[-1] - self.path.points[-2]
-        direction /= max(float(np.linalg.norm(direction)), 1.0e-9)
-        return float(np.dot(np.asarray([state.x, state.y]) - self.path.points[-1], direction))
 
     def _sample_randomization(self) -> None:
         cfg = self.config["domain_randomization"]
@@ -363,7 +370,9 @@ class NinoGazeboEnv(gym.Env):
         super().reset(seed=seed)
         # Episode setup requires a running clock.
         if self.world_is_paused:
-            self.ros.set_world_paused(False)
+            self.ros.set_world_paused(
+                False, timeout=self.simulation_step_timeout
+            )
             self.world_is_paused = False
         self.attempt_number += 1
         self.episode_steps = 0
@@ -378,6 +387,10 @@ class NinoGazeboEnv(gym.Env):
         self._last_noisy_state = None
         self._sample_randomization()
         stage, level, goal_x = self._curriculum_stage()
+        # Entity reset/spawn services can temporarily block Gazebo publishers.
+        # Record the mandatory truth stream before changing the world, then
+        # require a callback generated after those operations complete.
+        ground_truth_marker = self.ros.sensor_markers(["ground_truth"])
         self.ros.reset_episode(start_pose=self.start_pose)
         episode_cables = self._curriculum_cables(stage)
         self.ros.configure_training_cables(episode_cables)
@@ -387,8 +400,16 @@ class NinoGazeboEnv(gym.Env):
         self.ros.wait_for_sensors(self.sensor_timeout)
         self.ros.publish_straight_command(0.0)
         self.ros.wait_for_v2_controller()
-        if not self.ros.ground_truth_ready():
-            raise RuntimeError("Training slip reward needs /ground_truth/odom; actor does not")
+        # Do not make episode reset depend on a newly rendered GPU LiDAR
+        # frame.  The scan is BEST_EFFORT and can legitimately arrive after
+        # the world has entered lockstep; step() ignores it until fresh.
+        self.ros.wait_for_sensor_updates(
+            ground_truth_marker, self.sensor_timeout
+        )
+        if not self.ros.ground_truth_valid():
+            raise RuntimeError(
+                "Training slip reward received invalid /ground_truth/odom"
+            )
         self.path = self._make_curriculum_path()
         self.waypoint_targets = np.arange(
             self.waypoint_spacing, self.path.total_length, self.waypoint_spacing
@@ -419,13 +440,18 @@ class NinoGazeboEnv(gym.Env):
         # IMU messages generated during reset/navigation; using an earlier
         # sample here makes the first requested interval fall out of the IMU
         # window once that backlog is delivered.
-        self.ros.set_world_paused(True)
+        self.ros.set_world_paused(
+            True, timeout=self.simulation_step_timeout
+        )
         self.world_is_paused = True
         # Establish time zero from fresh post-reset /clock and IMU messages.
         # A one-physics-step flush here prevents callbacks from the previous
         # epoch shifting every later reward window; it is not paid per action.
         self.lockstep_sim_time = self.ros.begin_lockstep_epoch(
-            timeout=self.sensor_timeout
+            # This call executes a Gazebo physics step. Entity reset/spawn
+            # work can make the first response slower than sensor discovery,
+            # so use the dedicated simulation-service deadline.
+            timeout=self.simulation_step_timeout
         )
         truth = self.ros.snapshot()
         self.episode_started_sim = self.lockstep_sim_time
@@ -467,14 +493,12 @@ class NinoGazeboEnv(gym.Env):
         self.ros.publish_straight_command(
             self._straight_command(self.previous_tracking.endpoint_distance)
         )
-        # Lidar is nominally 10 Hz, equal to the action rate, and Gazebo can
-        # place its sample just beyond an exact 100 ms multi-step boundary.
-        # Require it every second action; all faster state/control streams are
-        # still mandatory every action. At the 0.4 m/s speed limit this permits
-        # at most 8 cm travel, inside the 10 cm collision safety threshold.
+        # Lidar is BEST_EFFORT at the same 10 Hz rate as the policy. Requiring
+        # a new DDS packet at an exact lockstep boundary makes one dropped scan
+        # fatal: the paused world cannot generate another one while we wait.
+        # Require all faster state/control streams here, then bound LiDAR age
+        # using its simulation timestamp below.
         sensor_names = ["odom", "ground_truth", "joint", "torque"]
-        if self.episode_steps % 2:
-            sensor_names.append("scan")
         sensor_markers = self.ros.sensor_markers(sensor_names)
         reward_reference = self._reference(
             self.previous_tracking, started_sim - self.episode_started_sim)
@@ -483,19 +507,23 @@ class NinoGazeboEnv(gym.Env):
             self.physics_steps_per_control - 1,
             int(round(delay / self.physics_dt)),
         )
-        step_timeout = float(
-            self.config["policy_v2"]["simulation_step_wall_timeout_seconds"]
-        )
+        step_timeout = self.simulation_step_timeout
         # A single long multi_step can outrun ROS/Gazebo sensor publishers.
         # Two 50 ms bursts give odometry, lidar and applied-torque callbacks a
         # scheduling boundary without returning to the old five-call cost.
         max_chunk_steps = max(1, self.physics_steps_per_control // 2)
+        advanced_sim = 0.0
 
         def advance_chunked(steps):
+            nonlocal advanced_sim
             remaining = int(steps)
             while remaining > 0:
                 chunk = min(max_chunk_steps, remaining)
-                self.ros.advance_world(chunk, timeout=step_timeout)
+                advanced_sim += self.ros.advance_world(
+                    chunk,
+                    timeout=step_timeout,
+                    min_completion_fraction=self.lockstep_min_completion_fraction,
+                )
                 remaining -= chunk
 
         if delay_steps:
@@ -507,10 +535,13 @@ class NinoGazeboEnv(gym.Env):
             torque[:] = 0.0
         self.ros.publish_control(scale, float(torque[0]), float(torque[1]))
         advance_chunked(self.physics_steps_per_control - delay_steps)
-        target_sim = started_sim + self.control_dt
-        ended_sim = target_sim
+        ended_sim = started_sim + advanced_sim
         self.lockstep_sim_time = ended_sim
-        step_dt = self.control_dt
+        step_dt = ended_sim - started_sim
+        if not np.isfinite(step_dt) or step_dt <= 0.0:
+            raise RuntimeError(
+                f"Lockstep produced invalid simulation interval {step_dt}"
+            )
         if self.config["policy_v2"].get("imu_strict_coverage", False):
             imu = self.ros.wait_for_impact(started_sim, ended_sim,
                 self.config["reward_v2"]["impact_acceleration_sigma_m_s2"],
@@ -541,6 +572,11 @@ class NinoGazeboEnv(gym.Env):
         if not self.ros.applied_torque_valid():
             self.ros.publish_control(0.0, 0.0, 0.0)
             raise RuntimeError("Applied torque feedback is invalid; effort reward cannot be computed")
+        lidar_max_lag = float(
+            self.config["policy_v2"].get("lidar_max_lag_seconds", 0.25)
+        )
+        lidar_lag = max(0.0, ended_sim - truth.lidar_stamp_s)
+        lidar_fresh = self.ros.sensor_stream_ready("scan", self.nav_stale_seconds)
         _, tracking = make_observation(truth, self.path, self.lookahead, action)
         # Use the odometry message timestamp, not the end of an IMU wait.
         self.trajectory.add(truth.odom_stamp_s - self.trajectory.clock_origin_sim_s,
@@ -559,17 +595,18 @@ class NinoGazeboEnv(gym.Env):
             self.next_waypoint_index += 1
             reached_waypoints += 1
         reference = self._reference(tracking, elapsed)
+        actor_state = self._noisy_state(truth)
+        if not lidar_fresh:
+            # Empty sectors encode maximum/unknown clearance.  A delayed GPU
+            # render must neither inject a scan from the previous pose into
+            # the policy nor create a false collision termination.
+            actor_state = deepcopy(actor_state)
+            actor_state.lidar_ranges = ()
         observation = self.history.append(self._actor_observation(
-            self._noisy_state(truth), action, reference))
+            actor_state, action, reference))
 
         min_lidar = min(truth.lidar_ranges, default=truth.lidar_range_max)
         succeeded = goal_reached(tracking, truth, self.config)
-        past_goal_distance = self._past_goal_distance(truth)
-        goal_overshoot = (
-            not succeeded
-            and past_goal_distance
-            > float(self.config.get("goal_overshoot_tolerance_m", 0.0))
-        )
         rolled = max(abs(degrees(truth.roll)), abs(degrees(truth.pitch))) >= float(
             self.config["rollover_limit_deg"]
         )
@@ -583,7 +620,20 @@ class NinoGazeboEnv(gym.Env):
         self.nav_invalid_steps = self.nav_invalid_steps + 1 if nav_invalid_sample else 0
         self.nav_invalid_seconds = self.nav_invalid_seconds + step_dt if nav_invalid_sample else 0.0
         navigation_invalid = self.nav_invalid_seconds >= float(self.config["navigation_invalid_hold_seconds"])
-        collision = np.isfinite(min_lidar) and min_lidar <= float(self.config["lidar_collision_m"])
+        # Conservatively account for forward travel since the latest scan.
+        # straight_speed is also the configured wheel-speed ceiling reference.
+        # GPU sensor rendering can legitimately trail physics by several scan
+        # periods during lockstep bursts even while packets keep arriving.
+        # Bound extrapolation to avoid turning render latency into a false
+        # collision. Delivery freshness independently decides whether this
+        # scan can be used at all.
+        collision_scan_lag = min(lidar_lag, lidar_max_lag)
+        collision_clearance = min_lidar - self.straight_speed * collision_scan_lag
+        collision = (
+            lidar_fresh
+            and np.isfinite(collision_clearance)
+            and collision_clearance <= float(self.config["lidar_collision_m"])
+        )
         wrong_direction_sample = (
             elapsed >= float(self.config["wrong_direction_grace_seconds"])
             and is_wrong_direction(tracking, truth, self.config)
@@ -594,8 +644,7 @@ class NinoGazeboEnv(gym.Env):
             self.wrong_direction_steps = 0
         self.wrong_direction_seconds = self.wrong_direction_seconds + step_dt if wrong_direction_sample else 0.0
         wrong_direction = self.wrong_direction_seconds >= float(self.config["wrong_direction_hold_seconds"])
-        failed = ("goal_overshoot" if goal_overshoot else
-                  "rollover" if rolled else "collision" if collision else
+        failed = ("rollover" if rolled else "collision" if collision else
                   "off_path" if off_path else "wrong_direction" if wrong_direction else
                   "navigation_invalid" if navigation_invalid else None)
         succeeded = bool(succeeded and not failed)
@@ -607,7 +656,6 @@ class NinoGazeboEnv(gym.Env):
             or off_path
             or navigation_invalid
             or collision
-            or goal_overshoot
             or timed_out
         )
         # The configured mission deadline is a task failure, not an external
@@ -618,6 +666,9 @@ class NinoGazeboEnv(gym.Env):
         stalled = self.stall_window.update(elapsed, delta_s,
             reference.valid and reference.desired_linear_velocity > 0.05
             and tracking.endpoint_distance > self.config["goal_tolerance_m"])
+        completion_fraction = float(np.clip(
+            tracking.path_s / self.path.total_length, 0.0, 1.0
+        ))
         reward, reward_terms = compute_reward(
             self.previous_tracking, tracking, truth, action, self.previous_action,
             torque, step_dt, imu,
@@ -626,6 +677,7 @@ class NinoGazeboEnv(gym.Env):
             succeeded=succeeded,
             failed=failed, stalled=stalled, impact_scale=min(1.0, 0.25 + level),
             reference=reward_reference, previous_state=self.previous_robot_state,
+            completion_fraction=completion_fraction,
         )
         self.episode_return += reward
         self.abs_lateral_sum += abs(tracking.lateral_error)
@@ -676,6 +728,9 @@ class NinoGazeboEnv(gym.Env):
             "reward_terms": reward_terms,
             "applied_torque_nm": measured_torque.tolist(),
             "residual_torque_nm": torque.tolist(),
+            "lidar_lag_seconds": lidar_lag,
+            "lidar_fresh": lidar_fresh,
+            "completion_fraction": completion_fraction,
             **metrics_dict(tracking, truth, elapsed, succeeded),
         }
         if terminated or truncated:
@@ -689,7 +744,6 @@ class NinoGazeboEnv(gym.Env):
                     )
             reason = (
         "success" if succeeded
-        else "goal_overshoot" if goal_overshoot
         else "rollover" if rolled
         else "wrong_direction" if wrong_direction
         else "off_path" if off_path
@@ -718,7 +772,6 @@ class NinoGazeboEnv(gym.Env):
                 "episode_start_time_unix": self.episode_start_time_unix,
                 "final_arrival_time_seconds": elapsed if succeeded else None,
                 "goal_reached": succeeded,
-                "past_goal_distance_m": past_goal_distance,
                 "adaptive_terrain_features": episode_feature_count,
                 "next_adaptive_terrain_features": self.terrain_feature_count,
                 "successful_episodes": self.successful_episodes,
@@ -769,7 +822,11 @@ class NinoGazeboEnv(gym.Env):
                     self.wrong_direction_seconds
                 ),
                 "termination": (
-                    "success" if succeeded else "goal_overshoot" if goal_overshoot else "rollover" if rolled else "wrong_direction" if wrong_direction else "off_path" if off_path else "navigation_invalid" if navigation_invalid else "collision" if collision else "timeout"
+                    "success" if succeeded else "rollover" if rolled else
+                    "wrong_direction" if wrong_direction else
+                    "off_path" if off_path else
+                    "navigation_invalid" if navigation_invalid else
+                    "collision" if collision else "timeout"
                 ),
             }
             self.ros.publish_control(0.0, 0.0, 0.0)
@@ -781,7 +838,9 @@ class NinoGazeboEnv(gym.Env):
             self.ros.publish_control(0.0, 0.0, 0.0)
             self.ros.publish_straight_command(0.0)
             if self.world_is_paused or self.world_paused_for_update:
-                self.ros.set_world_paused(False)
+                self.ros.set_world_paused(
+                    False, timeout=self.simulation_step_timeout
+                )
                 self.world_is_paused = False
                 self.world_paused_for_update = False
             sleep(0.05)

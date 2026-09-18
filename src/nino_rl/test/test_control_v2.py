@@ -133,6 +133,17 @@ class TestV2(unittest.TestCase):
         self.assertEqual(self.reward(failed="off_path")[1]["terminal"], -75)
         self.assertEqual(self.reward(timed_out=True)[1]["terminal"], -50)
 
+    def test_timeout_penalty_scales_with_route_completion(self):
+        previous = TrackingState(0, 0, 0, 30, 30)
+        current = TrackingState(24, 0, 0, 6, 6)
+        _, terms = compute_reward(
+            previous, current, RobotState(), BASELINE_ACTION, BASELINE_ACTION,
+            [0, 0], .1, {"impact_integral": 0},
+            {**CONFIG["reward_v2"], "torque_scale_nm": .5},
+            timed_out=True, completion_fraction=.8,
+        )
+        self.assertAlmostEqual(terms["terminal"], -10.0)
+
 
 class TestActuator(unittest.TestCase):
     """Execute actual production controller methods with a fake ROS clock/I/O."""
@@ -210,7 +221,7 @@ class TestActuator(unittest.TestCase):
 class TestEnvironmentContract(unittest.TestCase):
     def run_step(self, collision=False, timed_out=False, torque_fresh=True,
                  baseline=False, torque_noise=0., navigation_invalid=False,
-                 goal_overshoot=False):
+                 goal_crossed=False, lidar_stale=False):
         source = ROOT / "src/nino_rl/nino_rl/ros_env.py"
         cls = next(x for x in ast.parse(source.read_text()).body if isinstance(x, ast.ClassDef))
         step = next(x for x in cls.body if isinstance(x, ast.FunctionDef) and x.name == "step")
@@ -224,8 +235,11 @@ class TestEnvironmentContract(unittest.TestCase):
             goal_reached=goal_reached, is_wrong_direction=is_wrong_direction,
             metrics_dict=metrics_dict, wheel_slip_ratios=wheel_slip_ratios)
         exec(compile(ast.Module(body=[step], type_ignores=[]), str(source), "exec"), namespace)
-        state = RobotState(odom_stamp_s=.1, x=30.001 if goal_overshoot else .02,
-                           linear_velocity=.2 if goal_overshoot else 0.0,
+        state = RobotState(odom_stamp_s=.1,
+                           lidar_stamp_s=.8 if lidar_stale else 1.0,
+                           x=30.201 if goal_crossed else .02,
+                           yaw=.30 if goal_crossed else 0.0,
+                           linear_velocity=.2 if goal_crossed else 0.0,
                            accel_z=9.80665,
                            lidar_ranges=[.05 if collision else 3.0])
         path = PathTracker([(0, 0), (30, 0)])
@@ -234,13 +248,16 @@ class TestEnvironmentContract(unittest.TestCase):
         reference = NavReference(
             desired_linear_velocity=.3, valid=not navigation_invalid
         )
+        def advance_world(steps, timeout, min_completion_fraction):
+            clock[0] += steps * .005
+            return steps * .005
+
         ros = SimpleNamespace(
             publish_control=lambda *args: commands.append(args),
             publish_straight_command=lambda speed: None,
-            advance_world=lambda steps, timeout: clock.__setitem__(
-                0, clock[0] + steps * .001
-            ),
+            advance_world=advance_world,
             sensor_markers=lambda names: {name: 0.0 for name in names},
+            sensor_stream_ready=lambda name, stale_after: not lidar_stale,
             wait_for_sensor_updates=lambda previous, timeout: None,
             snapshot=lambda: state, ground_truth_ready=lambda: True,
             ground_truth_valid=lambda: True,
@@ -254,13 +271,15 @@ class TestEnvironmentContract(unittest.TestCase):
             get_logger=lambda: SimpleNamespace(warn=lambda _: None))
         env = SimpleNamespace(config=deepcopy(CONFIG), action_scale=.5, control_dt=.1,
             physics_dt=.005, physics_steps_per_control=20, world_is_paused=True,
+            simulation_step_timeout=10.0, straight_speed=0.75,
+            lockstep_min_completion_fraction=0.80,
+            nav_stale_seconds=2.0,
             _randomization={"delay": 0., "traction": 1., "torque_noise": torque_noise},
             lockstep_sim_time=1.0, ros=ros, episode_steps=0, global_steps=0,
             episode_started_sim=1., episode_start_time_unix=0.,
             np_random=np.random.default_rng(42), _episode_nav_path=None,
             path=path, lookahead=CONFIG["path"]["lookahead_m"],
             _straight_command=lambda distance: 0.3,
-            _past_goal_distance=lambda state: state.x - 30.0,
             previous_tracking=TrackingState(0, 0, 0, 30, 30),
             previous_robot_state=RobotState(accel_z=9.80665),
             previous_action=BASELINE_ACTION.copy(), action_before_previous=BASELINE_ACTION.copy(),
@@ -312,7 +331,9 @@ class TestEnvironmentContract(unittest.TestCase):
         (_, _, terminated, truncated, info), commands = self.run_step(timed_out=True)
         self.assertTrue(terminated)
         self.assertFalse(truncated)
-        self.assertEqual(info["reward_terms"]["terminal"], -50)
+        self.assertAlmostEqual(
+            info["reward_terms"]["terminal"], -50.0 * (1.0 - 0.02 / 30.0)
+        )
         self.assertEqual(info["episode_metrics"]["termination"], "timeout")
         self.assertEqual(commands[-1], (0., 0., 0.))
 
@@ -326,6 +347,20 @@ class TestEnvironmentContract(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "torque feedback is invalid"):
             self.run_step(torque_fresh=False)
 
+    def test_lidar_timestamp_lag_does_not_abort_live_transport(self):
+        self.run_step()
+        (_, _, terminated, _, info), _ = self.run_step(lidar_stale=True)
+        self.assertFalse(terminated)
+        self.assertGreater(info["lidar_lag_seconds"], 0.25)
+        self.assertFalse(info["lidar_fresh"])
+
+    def test_stale_lidar_cannot_cause_a_false_collision(self):
+        (_, _, terminated, _, info), _ = self.run_step(
+            collision=True, lidar_stale=True
+        )
+        self.assertFalse(terminated)
+        self.assertFalse(info["lidar_fresh"])
+
     def test_stale_navigation_terminates_episode_instead_of_training_run(self):
         (_, reward, terminated, truncated, info), commands = self.run_step(
             navigation_invalid=True
@@ -336,16 +371,17 @@ class TestEnvironmentContract(unittest.TestCase):
         self.assertEqual(info["reward_terms"]["terminal"], -100.0)
         self.assertEqual(commands[-1], (0.0, 0.0, 0.0))
 
-    def test_passing_goal_without_stopping_ends_episode_immediately(self):
+    def test_passing_goal_is_success_with_accuracy_penalties(self):
         (_, reward, terminated, truncated, info), commands = self.run_step(
-            goal_overshoot=True
+            goal_crossed=True
         )
         self.assertTrue(terminated)
         self.assertFalse(truncated)
-        self.assertEqual(info["episode_metrics"]["termination"], "goal_overshoot")
-        self.assertFalse(info["episode_metrics"]["goal_reached"])
-        self.assertGreater(info["episode_metrics"]["past_goal_distance_m"], 0.0)
-        self.assertEqual(info["reward_terms"]["terminal"], -100.0)
+        self.assertEqual(info["episode_metrics"]["termination"], "success")
+        self.assertTrue(info["episode_metrics"]["goal_reached"])
+        self.assertEqual(info["reward_terms"]["terminal"], 100.0)
+        self.assertLess(info["reward_terms"]["success_position"], 0.0)
+        self.assertLess(info["reward_terms"]["success_heading"], 0.0)
         self.assertEqual(commands[-1], (0.0, 0.0, 0.0))
 
 

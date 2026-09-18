@@ -168,6 +168,7 @@ class RobotState:
     accel_x: float = 0.0
     accel_y: float = 0.0
     accel_z: float = 0.0
+    lidar_stamp_s: float = -float("inf")
     lidar_ranges: Sequence[float] = ()
     lidar_range_max: float = 10.0
 
@@ -213,18 +214,16 @@ def wheel_slip_ratios(
 def goal_reached(
     tracking: TrackingState, state: RobotState, config: Mapping[str, float]
 ) -> bool:
-    """Require an accurate, upright, nearly stopped arrival at the endpoint."""
-    return (
-        tracking.endpoint_distance <= float(config["goal_tolerance_m"])
-        and abs(tracking.lateral_error)
-        <= float(config["goal_lateral_tolerance_m"])
-        and abs(tracking.heading_error)
-        <= radians(float(config["goal_heading_tolerance_deg"]))
-        and abs(state.linear_velocity) <= float(config["goal_max_speed_m_s"])
-        and abs(state.yaw_rate) <= float(config["goal_max_yaw_rate_rad_s"])
-        and max(abs(state.roll), abs(state.pitch))
-        <= radians(float(config["goal_max_tilt_deg"]))
-    )
+    """Return whether the robot has entered or crossed the goal plane.
+
+    Arrival accuracy is graded in the reward.  It is not a reason to turn a
+    completed traversal into a goal-overshoot failure.
+    """
+    tolerance = float(config["goal_tolerance_m"])
+    position_reached = tracking.endpoint_distance <= tolerance
+    if config.get("goal_capture_on_crossing", False):
+        position_reached = position_reached or tracking.distance_remaining <= tolerance
+    return bool(position_reached)
 
 
 def is_wrong_direction(

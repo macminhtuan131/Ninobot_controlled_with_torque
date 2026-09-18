@@ -103,10 +103,6 @@ def main() -> None:
                         "episode/wrong_direction_failure",
                         float(metrics["termination"] == "wrong_direction"),
                     )
-                    self.logger.record_mean(
-                        "episode/goal_overshoot_failure",
-                        float(metrics["termination"] == "goal_overshoot"),
-                    )
                     for name in (
                         "success",
                         "finished_within_target_time",
@@ -221,7 +217,7 @@ def main() -> None:
             model.save(interrupted)
             print(f"Saved {interrupted}.zip; unfinished rollout is discarded on resume.")
         print("Training interrupted cleanly; robot stopped and simulator released.")
-    except RuntimeError:
+    except (RuntimeError, TimeoutError):
         if "model" in locals():
             interrupted = run_dir / "nino_ppo_interrupted"
             model.save(interrupted)
