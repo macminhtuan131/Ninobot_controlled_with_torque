@@ -4,13 +4,13 @@ control_hz: 10.0
 max_episode_seconds: 20.0
 target_finish_seconds: 15.0
 max_wheel_torque_nm: 2.0
-goal_tolerance_m: 0.003
-# A 10 Hz controller can move several centimetres between samples. Count the
-# first valid crossing of the endpoint plane so it cannot skip a 3 mm target.
-goal_capture_on_crossing: true
+goal_tolerance_m: 0.10
+# Success is restricted to this small endpoint circle. Crossing the infinite
+# goal plane is deliberately disabled because it accepted large lateral misses.
+goal_capture_on_crossing: false
 goal_require_stopped: false
-# Reaching or crossing the goal plane is success. Final position and heading
-# accuracy are graded by reward_v2 instead of changing success into failure.
+# The robot must also face the path direction. Speed and tilt remain graded by
+# reward/safety terms rather than making the endpoint circle impractical.
 goal_lateral_tolerance_m: 0.25
 goal_heading_tolerance_deg: 12.0
 goal_max_speed_m_s: 0.10
@@ -149,18 +149,18 @@ terrain_curriculum:
     - {name: easy, diameter_m: 0.007, angle_deg: 9.0}
     - {name: easiest, diameter_m: 0.005, angle_deg: 0.0}
 
-# Success-driven clutter around the main cable. One feature is added after
-# every successful episode until the cap. All geometry stays outside the clear
-# center corridor, so it increases sensing/recovery difficulty without blocking
-# the straight route. Evaluation freezes the count at evaluation_features.
+# Success-driven hazards around the main cable. One feature is added after
+# every successful episode until the cap. Positions and type ordering are
+# randomized every episode, and every feature intersects the nominal straight
+# trajectory so the policy must react. Evaluation freezes only the count.
 adaptive_terrain:
   enabled: true
   initial_features: 0
   add_per_success: 1
   max_features: 20
   evaluation_features: 20
-  zone_x_m: [2.8, 5.2]
-  path_clearance_m: 0.60
+  zone_x_m: [1.2, 5.2]
+  max_center_offset_m: 0.10
   max_lateral_center_m: 1.55
 
 domain_randomization:

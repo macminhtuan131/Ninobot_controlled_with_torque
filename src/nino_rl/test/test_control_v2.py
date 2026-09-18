@@ -221,7 +221,7 @@ class TestActuator(unittest.TestCase):
 class TestEnvironmentContract(unittest.TestCase):
     def run_step(self, collision=False, timed_out=False, torque_fresh=True,
                  baseline=False, torque_noise=0., navigation_invalid=False,
-                 goal_crossed=False, lidar_stale=False):
+                 goal_reached_position=False, goal_crossed=False, lidar_stale=False):
         source = ROOT / "src/nino_rl/nino_rl/ros_env.py"
         cls = next(x for x in ast.parse(source.read_text()).body if isinstance(x, ast.ClassDef))
         step = next(x for x in cls.body if isinstance(x, ast.FunctionDef) and x.name == "step")
@@ -237,9 +237,9 @@ class TestEnvironmentContract(unittest.TestCase):
         exec(compile(ast.Module(body=[step], type_ignores=[]), str(source), "exec"), namespace)
         state = RobotState(odom_stamp_s=.1,
                            lidar_stamp_s=.8 if lidar_stale else 1.0,
-                           x=30.201 if goal_crossed else .02,
-                           yaw=.30 if goal_crossed else 0.0,
-                           linear_velocity=.2 if goal_crossed else 0.0,
+                           x=29.95 if goal_reached_position else 30.201 if goal_crossed else .02,
+                           yaw=.05 if goal_reached_position else .30 if goal_crossed else 0.0,
+                           linear_velocity=.2 if (goal_reached_position or goal_crossed) else 0.0,
                            accel_z=9.80665,
                            lidar_ranges=[.05 if collision else 3.0])
         path = PathTracker([(0, 0), (30, 0)])
@@ -371,9 +371,9 @@ class TestEnvironmentContract(unittest.TestCase):
         self.assertEqual(info["reward_terms"]["terminal"], -100.0)
         self.assertEqual(commands[-1], (0.0, 0.0, 0.0))
 
-    def test_passing_goal_is_success_with_accuracy_penalties(self):
+    def test_entering_goal_circle_is_success_with_accuracy_penalties(self):
         (_, reward, terminated, truncated, info), commands = self.run_step(
-            goal_crossed=True
+            goal_reached_position=True
         )
         self.assertTrue(terminated)
         self.assertFalse(truncated)
@@ -383,6 +383,12 @@ class TestEnvironmentContract(unittest.TestCase):
         self.assertLess(info["reward_terms"]["success_position"], 0.0)
         self.assertLess(info["reward_terms"]["success_heading"], 0.0)
         self.assertEqual(commands[-1], (0.0, 0.0, 0.0))
+
+    def test_crossing_goal_plane_outside_circle_is_not_success(self):
+        (_, _, terminated, truncated, info), _ = self.run_step(goal_crossed=True)
+        self.assertFalse(terminated)
+        self.assertFalse(truncated)
+        self.assertNotIn("episode_metrics", info)
 
 
 if __name__ == "__main__":

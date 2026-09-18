@@ -65,24 +65,28 @@ def test_straight_command_cruises_slows_crawls_and_stops_at_one_cm():
     assert command(env, 0.01) == 0.0
 
 
-def test_adaptive_terrain_adds_mixed_features_outside_clear_path():
+def test_adaptive_terrain_randomizes_mixed_features_across_path():
     features = method('ros_env.py', '_adaptive_terrain_features', dict(np=np))
     env = SimpleNamespace(
         adaptive_terrain_enabled=True,
         terrain_feature_count=20,
+        np_random=np.random.default_rng(42),
         config={"adaptive_terrain": {
-            "zone_x_m": [2.8, 5.2],
-            "path_clearance_m": 0.60,
+            "zone_x_m": [1.2, 5.2],
+            "max_center_offset_m": 0.10,
             "max_lateral_center_m": 1.55,
         }},
     )
     generated = features(env)
+    env.np_random = np.random.default_rng(43)
+    regenerated = features(env)
     assert len(generated) == 20
     assert {feature[0] for feature in generated} == {"pothole", "obstacle", "cable"}
     for kind, x, y, size in generated:
-        assert 2.8 <= x <= 5.2
-        assert abs(y) - size >= 0.60
+        assert 1.2 <= x <= 5.2
+        assert abs(y) <= 0.10
         assert abs(y) + size < 1.80
+    assert generated != regenerated
 
 
 def test_operating_envelope_saturation_cost_and_dt():

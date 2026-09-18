@@ -27,10 +27,11 @@ discovery, preventing another machine or simulator from injecting a conflicting
 - [Bài viết nghiên cứu tổng quan bằng tiếng Việt](docs/BAO_CAO_NGHIEN_CUU_RL_NINO.md)
 - [Simulation and hardware reference](docs/HARDWARE_REFERENCE.md)
 
-The current training contract is revision 21. Its validator can migrate only
-the explicitly supported v2 revisions 9–20 when their saved configuration
-matches; otherwise start a new run. Old 54-input/2-action models are
-incompatible. No pretrained weights or measured performance gains are included.
+The current training contract is revision 22. Because its endpoint and hazard
+semantics changed, older training checkpoints cannot be resumed; start a new
+run. Old models may still be used for inference with their matching config.
+Old 54-input/2-action models are incompatible. No pretrained weights or
+measured performance gains are included.
 
 ## 1. Prepare Ubuntu and the NVIDIA GPU
 
@@ -172,7 +173,7 @@ source install/setup.bash
 Set the endpoint and forward controller in `src/nino_rl/config/ppo.yaml`:
 
 ```yaml
-goal_tolerance_m: 0.003
+goal_tolerance_m: 0.10
 navigation:
   start_pose: [0.0, 0.0, 0.0]
   goal_pose: [6.0, 0.0, 0.0]
@@ -181,19 +182,21 @@ navigation:
   goal_slowdown_distance_m: 1.00
 ```
 
-The robot is successful when it reaches the 3 mm endpoint region or crosses
-the goal plane. The success reward is reduced smoothly by final position and
-heading error, so inaccurate arrivals still score less without becoming an
-overshoot failure. The direct command always has
+The robot is successful only while its center is inside the 10 cm endpoint
+circle and its heading is within 12 degrees of the path direction. Merely
+crossing the goal plane no longer counts, so overshoots and lateral misses are
+failures. The direct command always has
 `angular.z = 0`; the residual policy may apply differential wheel correction to
 counter drift while following the straight reference. The curriculum cable is
 at `x=4 m`, leaving 2 m for recovery and drift measurement before the 6 m goal.
 With `headless:=false`, Gazebo displays the goal as a bright green disc, pole,
 and flag. The marker is visual-only and cannot collide with the robot or LiDAR.
 
-After each successful episode, one extra side feature is added near the
-cable zone, cycling through pothole-like rough patches, obstacles, and short
-cables until 20 are present. A ±0.60 m center corridor always remains clear.
+After each successful episode, one extra hazard is added, cycling through
+pothole-like rough patches, obstacles, and short cables until 20 are present.
+Their type order and positions are randomized per episode inside the training
+zone, with centers within 10 cm of the nominal path so driving straight cannot
+simply bypass them.
 
 Terminal A:
 

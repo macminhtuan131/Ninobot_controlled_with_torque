@@ -214,16 +214,13 @@ def wheel_slip_ratios(
 def goal_reached(
     tracking: TrackingState, state: RobotState, config: Mapping[str, float]
 ) -> bool:
-    """Return whether the robot has entered or crossed the goal plane.
-
-    Arrival accuracy is graded in the reward.  It is not a reason to turn a
-    completed traversal into a goal-overshoot failure.
-    """
+    """Return whether the robot is inside the endpoint circle and aligned."""
     tolerance = float(config["goal_tolerance_m"])
     position_reached = tracking.endpoint_distance <= tolerance
-    if config.get("goal_capture_on_crossing", False):
-        position_reached = position_reached or tracking.distance_remaining <= tolerance
-    return bool(position_reached)
+    heading_reached = abs(tracking.heading_error) <= radians(
+        float(config.get("goal_heading_tolerance_deg", 180.0))
+    )
+    return bool(position_reached and heading_reached)
 
 
 def is_wrong_direction(

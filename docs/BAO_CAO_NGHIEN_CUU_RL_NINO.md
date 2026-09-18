@@ -284,11 +284,11 @@ hiệu đặc quyền chỉ phục vụ reward/đánh giá trong mô phỏng, kh
   \(-30K(d_g,0.25)-20K(e_\psi,0.20944)\).
 
 Nhờ vậy một lần đến đích luôn nhận bonus thành công, nhưng vị trí và hướng cuối
-càng chính xác thì return càng cao. Không còn nhãn `goal_overshoot`: robot thành
-công khi cách endpoint không quá 3 mm **hoặc** đã cắt qua mặt phẳng đích. Ở tốc
-độ lấy mẫu 10 Hz, điều kiện crossing tránh bỏ lỡ vùng 3 mm giữa hai bước. Sai số
-đến đích không biến thành failure riêng; tuy nhiên các failure an toàn có độ ưu
-tiên cao hơn success.
+càng chính xác thì return càng cao. Robot chỉ thành công khi tâm robot nằm trong
+vòng tròn bán kính 0,10 m quanh endpoint và sai số hướng không quá 12°. Việc chỉ
+cắt qua mặt phẳng đích không còn được tính thành công, nên overshoot và lệch
+ngang không thể nhận nhầm bonus. Các failure an toàn vẫn có độ ưu tiên cao hơn
+success.
 
 Hệ số impact là
 
@@ -347,10 +347,11 @@ tỷ lệ tổng bước `[0; 0,15; 0,30; 0,50; 0,70; 0,85]`, nhưng đó không
 
 **Adaptive terrain tăng độ phức tạp sau thành công.** Ban đầu có 0 feature phụ.
 Sau mỗi episode thành công, môi trường thêm một feature, tối đa 20, luân phiên
-giữa pothole, obstacle và cable ngắn trong vùng \(x=2,8\ldots5,2\) m. Các vật
-này nằm ngoài hành lang giữa rộng ±0,60 m nên không chặn đường thẳng; chúng làm
-bối cảnh cảm biến và bài toán phục hồi phức tạp hơn. Khi đánh giá, số feature
-được đóng băng ở 20 để các model chịu cùng điều kiện.
+giữa pothole, obstacle và cable ngắn trong vùng \(x=1,2\ldots5,2\) m. Thứ tự
+loại, tọa độ dọc và độ lệch ngang được lấy mẫu lại mỗi episode theo seed; tâm
+feature cách đường chuẩn không quá 0,10 m. Vì vậy đường đi thẳng giao với các
+hazard và policy phải học phản ứng/né tránh. Khi đánh giá, số feature được đóng
+băng ở 20 nhưng layout vẫn được random hóa theo seed để so sánh công bằng.
 
 Domain randomization hiện **tắt**. Nếu bật có chủ đích, nó mới thêm thay đổi ở
 kênh residual và cảm biến như delay, torque noise, traction scale, nhiễu/bias
@@ -361,7 +362,7 @@ contact của Gazebo, nên không nên gọi là physical domain randomization �
 
 Episode kết thúc khi đạt một trong các điều kiện:
 
-- success: vào vùng 3 mm hoặc cắt mặt phẳng đích;
+- success: vào vòng tròn bán kính 0,10 m và sai số hướng không quá 12°;
 - timeout: 20 s mô phỏng;
 - rollover: |roll| hoặc |pitch| ≥ 35°;
 - collision theo LiDAR: khoảng hở hiệu chỉnh ≤ 0,10 m;
@@ -391,7 +392,8 @@ Rollout đang thu dở tại thời điểm lỗi hoặc Ctrl-C không được 
 “unfinished rollout is discarded on resume” là hành vi đúng của PPO on-policy,
 không có nghĩa là toàn bộ policy đã mất. Chỉ nên resume checkpoint có training
 contract tương thích và dùng YAML được lưu cùng run. Contract hiện tại là
-revision 21; validator ngăn việc âm thầm tiếp tục bằng reward/observation khác.
+revision 22; do điều kiện đích và phân bố hazard đã đổi, checkpoint cũ không
+được resume để tránh trộn hai bài toán huấn luyện khác nhau.
 
 ## 10. Thiết kế đánh giá
 
@@ -422,8 +424,9 @@ không rollover/collision, P95 sai số đường trong giới hạn đã thốn
 - Slip reward dựa vào ground truth chỉ tồn tại trong mô phỏng; actor không phụ
   thuộc tín hiệu này, nhưng reward cần được thiết kế lại hoặc ước lượng khi fine
   tune trên robot thật.
-- Adaptive feature nằm ngoài hành lang giữa nên chưa buộc robot né vật cản trên
-  đường; trọng tâm vẫn là bám thẳng và vượt bump.
+- Adaptive feature là hazard runtime xấp xỉ (pothole dùng vành gồ trên sàn phẳng,
+  không phải phép trừ mesh tạo hố thật), nên vẫn cần kiểm chứng thêm bằng terrain
+  mesh và nhiều seed trước khi suy luận sang robot thật.
 - Domain randomization chưa mô hình hóa thay đổi vật lý đầy đủ như ma sát, tải,
   khối lượng, bán kính bánh hoặc sai số actuator.
 - PPO on-policy tốn mẫu; huấn luyện một world Gazebo không tận dụng được mô phỏng

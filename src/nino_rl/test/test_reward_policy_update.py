@@ -130,18 +130,12 @@ class RewardTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "NEW run"):
             validate_resume(SimpleNamespace(), CONFIG)
 
-    def test_revision_9_checkpoint_migrates_only_lidar_transport_fix(self):
+    def test_pre_revision_22_checkpoint_is_rejected_for_new_task(self):
         legacy = training_contract(CONFIG)
-        legacy["revision"] = 9
-        del legacy["policy_v2"]["lidar_max_lag_seconds"]
+        legacy["revision"] = 21
         model = SimpleNamespace(nino_training_contract=legacy)
-        validate_resume(model, CONFIG)
-        self.assertEqual(model.nino_training_contract, training_contract(CONFIG))
-
-        incompatible = deepcopy(legacy)
-        incompatible["reward_v2"]["progress_weight"] += 1.0
         with self.assertRaisesRegex(ValueError, "NEW run"):
-            validate_resume(SimpleNamespace(nino_training_contract=incompatible), CONFIG)
+            validate_resume(model, CONFIG)
 
 
 try:

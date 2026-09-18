@@ -270,8 +270,8 @@ def test_six_phase_curriculum_and_straight_goal_are_configured():
     assert config["navigation"]["goal_pose"][0] - cable_x == 2.0
     assert config["navigation"]["cmd_vel_topic"] == "/cmd_vel"
     assert config["navigation"]["straight_speed_m_s"] == 0.75
-    assert config["goal_tolerance_m"] == 0.003
-    assert config["goal_capture_on_crossing"] is True
+    assert config["goal_tolerance_m"] == 0.10
+    assert config["goal_capture_on_crossing"] is False
     assert config["goal_require_stopped"] is False
     control_period = 1.0 / config["control_hz"]
     physics_step = config["policy_v2"]["simulation_physics_step_seconds"]
@@ -292,7 +292,8 @@ def test_straight_mode_has_no_nav2_runtime_dependency():
     assert "linorobot2_navigation" not in package
     assert "subscribe_plan=False" in environment
     assert "publish_straight_command" in environment
-    assert "configure_goal_marker(self.goal_pose)" in environment
+    assert "self.ros.configure_goal_marker(" in environment
+    assert 'radius=float(self.config["goal_tolerance_m"])' in environment
     assert "subscribe_plan=False" in policy
 
 
@@ -306,9 +307,10 @@ def test_goal_marker_is_visible_but_has_no_collision_geometry():
     )
     namespace = {}
     exec(compile(ast.Module(body=[method], type_ignores=[]), str(source_path), "exec"), namespace)
-    root = ET.fromstring(namespace["_goal_marker_sdf"]("training_goal_marker"))
+    root = ET.fromstring(namespace["_goal_marker_sdf"]("training_goal_marker", 0.10))
     assert len(root.findall(".//visual")) == 3
     assert root.find(".//collision") is None
+    assert float(root.find(".//visual[@name='goal_disc']//radius").text) == 0.10
 
     configure = next(
         node for node in interface.body

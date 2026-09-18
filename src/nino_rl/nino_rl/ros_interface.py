@@ -1296,12 +1296,12 @@ class RosRobotInterface(Node):
                     raise RuntimeError(f"Gazebo failed to spawn {name} after retry")
 
     @staticmethod
-    def _goal_marker_sdf(name: str) -> str:
+    def _goal_marker_sdf(name: str, radius: float = 0.10) -> str:
         """Return a bright, visual-only goal beacon that cannot affect physics."""
         return f"""<?xml version='1.0'?>
 <sdf version='1.9'><model name='{name}'><static>true</static><link name='marker'>
 <visual name='goal_disc'><pose>0 0 0.01 0 0 0</pose><geometry><cylinder>
-<radius>0.25</radius><length>0.02</length></cylinder></geometry><material>
+<radius>{radius:.6f}</radius><length>0.02</length></cylinder></geometry><material>
 <ambient>0.05 1 0.05 1</ambient><diffuse>0.05 1 0.05 1</diffuse>
 <emissive>0 0.6 0 1</emissive></material></visual>
 <visual name='goal_pole'><pose>0 0 0.50 0 0 0</pose><geometry><cylinder>
@@ -1315,7 +1315,8 @@ class RosRobotInterface(Node):
 </link></model></sdf>"""
 
     def configure_goal_marker(
-        self, goal_pose: tuple[float, float, float], timeout: float = 5.0
+        self, goal_pose: tuple[float, float, float], timeout: float = 5.0,
+        radius: float = 0.10,
     ) -> None:
         """Create the goal marker once, then move it without visual gaps."""
         name = "training_goal_marker"
@@ -1348,7 +1349,7 @@ class RosRobotInterface(Node):
             request = SpawnEntity.Request()
             request.entity_factory.name = name
             request.entity_factory.allow_renaming = False
-            request.entity_factory.sdf = self._goal_marker_sdf(name)
+            request.entity_factory.sdf = self._goal_marker_sdf(name, radius)
             request.entity_factory.pose.position.x = float(goal_pose[0])
             request.entity_factory.pose.position.y = float(goal_pose[1])
             request.entity_factory.pose.orientation.z = sin(0.5 * float(goal_pose[2]))

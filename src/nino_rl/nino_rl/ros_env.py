@@ -215,7 +215,7 @@ class NinoGazeboEnv(gym.Env):
         return PathTracker(np.linspace(start, goal, sample_count))
 
     def _straight_command(self, endpoint_distance: float) -> float:
-        """Slow smoothly near the endpoint so the 3 mm goal is attainable."""
+        """Slow smoothly near the endpoint circle."""
         tolerance = float(self.config["goal_tolerance_m"])
         remaining = max(0.0, float(endpoint_distance) - tolerance)
         fraction = np.clip(
@@ -258,31 +258,27 @@ class NinoGazeboEnv(gym.Env):
         )]
 
     def _adaptive_terrain_features(self) -> list[tuple[str, float, float, float]]:
-        """Return deterministic side features while preserving the center lane."""
+        """Return per-episode randomized hazards across the nominal path."""
         if not self.adaptive_terrain_enabled:
             return []
         config = self.config["adaptive_terrain"]
         x_min, x_max = (float(value) for value in config["zone_x_m"])
-        clearance = float(config["path_clearance_m"])
+        max_center_offset = float(config["max_center_offset_m"])
         max_lateral = float(config["max_lateral_center_m"])
-        if not x_min < x_max or not 0.0 < clearance < max_lateral < 1.80:
+        if not x_min < x_max or not 0.0 <= max_center_offset < max_lateral < 1.80:
             raise ValueError("adaptive terrain bounds must fit inside the hallway")
         features = []
-        kinds = ("pothole", "obstacle", "cable")
+        kinds = tuple(self.np_random.permutation(("pothole", "obstacle", "cable")))
+        count = max(1, self.terrain_feature_count)
         for index in range(self.terrain_feature_count):
             kind = kinds[index % len(kinds)]
             size = (0.18 if kind == "pothole" else
                     0.12 if kind == "obstacle" else 0.015)
-            # A low-discrepancy sequence spreads repeated successes through the
-            # cable zone instead of stacking objects at identical positions.
-            fraction = (index * 0.6180339887498949 + 0.17) % 1.0
+            # Stratification prevents a random pile-up while the jitter and
+            # lateral offset produce a new, seed-reproducible layout each episode.
+            fraction = (index + self.np_random.uniform(0.15, 0.85)) / count
             x = x_min + fraction * (x_max - x_min)
-            side = -1.0 if index % 2 else 1.0
-            lateral_room = max_lateral - clearance - size - 0.08
-            y = side * (
-                clearance + size + 0.08
-                + max(0.0, lateral_room) * ((index * 0.37) % 1.0)
-            )
+            y = self.np_random.uniform(-max_center_offset, max_center_offset)
             features.append((kind, float(x), float(y), float(size)))
         return features
 
@@ -396,7 +392,9 @@ class NinoGazeboEnv(gym.Env):
         self.ros.configure_training_cables(episode_cables)
         episode_features = self._adaptive_terrain_features()
         self.ros.configure_adaptive_terrain(episode_features)
-        self.ros.configure_goal_marker(self.goal_pose)
+        self.ros.configure_goal_marker(
+            self.goal_pose, radius=float(self.config["goal_tolerance_m"])
+        )
         self.ros.wait_for_sensors(self.sensor_timeout)
         self.ros.publish_straight_command(0.0)
         self.ros.wait_for_v2_controller()

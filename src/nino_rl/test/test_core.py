@@ -329,10 +329,10 @@ def test_goal_completion_depends_on_reaching_endpoint_not_arrival_quality():
     )
 
 
-def test_goal_plane_capture_cannot_skip_three_millimetre_target():
+def test_goal_requires_small_endpoint_circle_and_correct_heading():
     config = {
-        "goal_tolerance_m": 0.003,
-        "goal_capture_on_crossing": True,
+        "goal_tolerance_m": 0.10,
+        "goal_capture_on_crossing": False,
         "goal_require_stopped": False,
         "goal_lateral_tolerance_m": 0.25,
         "goal_heading_tolerance_deg": 12.0,
@@ -340,10 +340,12 @@ def test_goal_plane_capture_cannot_skip_three_millimetre_target():
         "goal_max_yaw_rate_rad_s": 0.30,
         "goal_max_tilt_deg": 10.0,
     }
-    crossed = TrackingState(30.0, 0.02, np.deg2rad(2.0), 0.0, 0.05)
-    assert goal_reached(crossed, RobotState(linear_velocity=0.5), config)
+    inside = TrackingState(29.95, 0.02, np.deg2rad(2.0), 0.05, 0.054)
+    assert goal_reached(inside, RobotState(linear_velocity=0.5), config)
     crossed_laterally = TrackingState(30.0, 0.30, 0.0, 0.0, 0.30)
-    assert goal_reached(crossed_laterally, RobotState(), config)
+    assert not goal_reached(crossed_laterally, RobotState(), config)
+    wrong_heading = TrackingState(29.95, 0.02, np.deg2rad(13.0), 0.05, 0.054)
+    assert not goal_reached(wrong_heading, RobotState(), config)
 
 
 def test_reward_adds_more_points_for_earlier_finish():
