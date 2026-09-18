@@ -242,12 +242,16 @@ def test_nino_python_tools_force_the_same_local_isolated_ros_domain():
         assert '"ROS_AUTOMATIC_DISCOVERY_RANGE"' in text
 
 
-def test_episode_reset_requires_fresh_ground_truth_but_not_fresh_lidar():
+def test_episode_reset_and_step_require_fresh_terrain_preview():
     source = (ROOT / "src" / "nino_rl" / "nino_rl" / "ros_env.py").read_text()
     reset = source[source.index("    def reset("):source.index("    def step(")]
-    assert 'sensor_markers(["ground_truth"])' in reset
+    step = source[source.index("    def step("):]
+    assert 'reset_sensor_names = ["ground_truth"]' in reset
+    assert 'reset_sensor_names.append("terrain")' in reset
+    assert "post_mutation_markers" in reset
     assert "wait_for_sensor_updates" in reset
     assert 'sensor_markers(["scan"])' not in reset
+    assert 'sensor_names.append("terrain")' in step
 
 
 def test_six_phase_curriculum_and_straight_goal_are_configured():
@@ -321,6 +325,17 @@ def test_goal_marker_is_visible_but_has_no_collision_geometry():
     assert "DeleteEntity.Request" not in configure_source
 
 
+def test_robot_has_bridged_downward_terrain_laser():
+    urdf = (ROOT / "src" / "nino_description" / "urdf" / "nino.urdf.xacro").read_text()
+    bridge = yaml.safe_load(
+        (ROOT / "src" / "nino_description" / "config" / "bridge.yaml").read_text()
+    )
+    assert 'name="terrain_laser"' in urdf
+    assert 'type="gpu_lidar"' in urdf
+    assert "<topic>terrain_scan</topic>" in urdf
+    assert any(item.get("ros_topic_name") == "/terrain_scan" for item in bridge)
+
+
 def test_adaptive_terrain_sdf_contains_all_three_feature_types():
     source_path = ROOT / "src" / "nino_rl" / "nino_rl" / "ros_interface.py"
     module = ast.parse(source_path.read_text())
@@ -340,3 +355,10 @@ def test_adaptive_terrain_sdf_contains_all_three_feature_types():
     assert len(root.findall(".//link")) == 3
     assert len(root.findall(".//collision")) >= 6
     assert "pothole" in sdf and "obstacle" in sdf and "cable" in sdf
+    pothole_collisions = [
+        collision for collision in root.findall(".//collision")
+        if "pothole" in collision.attrib.get("name", "")
+    ]
+    assert len(pothole_collisions) == 48
+    pitches = [abs(float(item.find("pose").text.split()[4])) for item in pothole_collisions]
+    assert all(0.15 < pitch < 0.30 for pitch in pitches)

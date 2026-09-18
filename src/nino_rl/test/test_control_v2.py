@@ -131,7 +131,7 @@ class TestV2(unittest.TestCase):
         self.assertEqual(self.reward(succeeded=True, failed="collision",
                                      timed_out=True)[1]["terminal"], -100)
         self.assertEqual(self.reward(failed="off_path")[1]["terminal"], -75)
-        self.assertEqual(self.reward(timed_out=True)[1]["terminal"], -50)
+        self.assertEqual(self.reward(timed_out=True)[1]["terminal"], -100)
 
     def test_timeout_penalty_scales_with_route_completion(self):
         previous = TrackingState(0, 0, 0, 30, 30)
@@ -142,7 +142,20 @@ class TestV2(unittest.TestCase):
             {**CONFIG["reward_v2"], "torque_scale_nm": .5},
             timed_out=True, completion_fraction=.8,
         )
-        self.assertAlmostEqual(terms["terminal"], -10.0)
+        self.assertAlmostEqual(terms["terminal"], -60.0)
+
+    def test_success_rewards_positive_target_time_margin(self):
+        _, early = self.reward(
+            succeeded=True, elapsed=10.0, target_finish_seconds=15.0
+        )
+        _, late = self.reward(
+            succeeded=True, elapsed=16.0, target_finish_seconds=15.0
+        )
+        self.assertAlmostEqual(
+            early["on_time_success"],
+            CONFIG["reward_v2"]["on_time_success_bonus"] / 3.0,
+        )
+        self.assertEqual(late["on_time_success"], 0.0)
 
 
 class TestActuator(unittest.TestCase):
@@ -296,6 +309,11 @@ class TestEnvironmentContract(unittest.TestCase):
         env.terrain_features_per_success = 1
         env.max_terrain_features = 20
         env.adaptive_terrain_progress = True
+        env.terrain_success_window_size = 50
+        env.terrain_advance_success_rate = .75
+        env.terrain_success_window = []
+        env.terrain_episodes_at_level = 0
+        env._record_adaptive_terrain_outcome = lambda succeeded: (float(succeeded), 1, False)
         env.successful_episodes = 0
         for key in ("vertical_square_integral", "imu_coverage_seconds", "peak_vertical_acceleration",
                     "episode_return", "abs_lateral_sum", "lateral_square_sum", "abs_roll_sum",
@@ -303,6 +321,10 @@ class TestEnvironmentContract(unittest.TestCase):
                     "max_tilt_deg", "max_path_deviation", "slip_square_sum", "max_abs_slip",
                     "torque_square_sum", "max_abs_torque", "accel_square_sum"):
             setattr(env, key, 0.)
+        env.speed_scale_sum = 0.
+        env.min_speed_scale = 1.
+        env.max_speed_scale = 0.
+        env.ground_speed_sum = 0.
         env.config["evaluation_baseline"] = baseline
         if navigation_invalid:
             env.config["navigation_invalid_hold_seconds"] = .05
@@ -332,7 +354,8 @@ class TestEnvironmentContract(unittest.TestCase):
         self.assertTrue(terminated)
         self.assertFalse(truncated)
         self.assertAlmostEqual(
-            info["reward_terms"]["terminal"], -50.0 * (1.0 - 0.02 / 30.0)
+            info["reward_terms"]["terminal"],
+            -100.0 * (0.5 + 0.5 * (1.0 - 0.02 / 30.0)),
         )
         self.assertEqual(info["episode_metrics"]["termination"], "timeout")
         self.assertEqual(commands[-1], (0., 0., 0.))

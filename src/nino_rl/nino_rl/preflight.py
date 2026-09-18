@@ -55,6 +55,8 @@ def run_preflight(config: dict, timeout: float = 30.0) -> list[str]:
     try:
         node.set_world_paused(False, timeout=timeout)
         node.wait_for_sensors(timeout)
+        if config["policy_v2"].get("require_terrain_preview", False):
+            node.wait_for_terrain_preview(timeout)
         clock_publishers = node.get_publishers_info_by_topic("/clock")
         if len(clock_publishers) != 1:
             publishers = ", ".join(
@@ -91,11 +93,15 @@ def run_preflight(config: dict, timeout: float = 30.0) -> list[str]:
         finite_scan = [value for value in state.lidar_ranges if isfinite(value)]
         if not finite_scan or min(finite_scan) < 0.0:
             raise RuntimeError("laser scan has no finite non-negative range")
-        passed.append("6 laser scan is valid")
+        preview = node.terrain_preview(timeout)
+        if config["policy_v2"].get("require_terrain_preview", False) and not preview[-1]:
+            raise RuntimeError("downward terrain preview is missing or stale")
+        passed.append("6 forward and downward terrain laser scans are valid")
 
         required_tf = [
             ("odom", "base_footprint"), ("base_footprint", "base_link"),
             ("base_link", "imu_link"), ("base_link", "laser"),
+            ("base_link", "terrain_laser"),
             ("base_link", "left_wheel_link"), ("base_link", "right_wheel_link"),
         ]
         for parent, child in required_tf:

@@ -1,7 +1,7 @@
 # RL engineering update: reward, policy and evaluation
 
 Base: `add_rl` commit `d015b8239648c64974e5badd041aa87f3a5a0fdc`.
-Training contract revision: **4**. No trained model is bundled.
+Training contract revision: **24**. No trained model is bundled.
 The [root README](../../README.md) is the authoritative installation-to-training guide.
 
 ## Decisions from the supplied research report
@@ -35,7 +35,14 @@ Each frame has 60 values. Five frames, oldest to newest, give a 300-dimensional
 observation. Frames include nine robot-relative path lookaheads, heading sine
 and cosine, body/wheel velocities, IMU quaternion/gyro/acceleration, five LiDAR
 sectors, Nav2 reference/waypoint context, previous actions and optional terrain
-preview. The actor excludes simulator ground-truth velocity and slip.
+preview fields. The current configuration requires valid preview data. The actor
+excludes simulator ground-truth velocity and slip.
+
+The terrain preview is active by default and comes from a 20 Hz downward-looking
+31-ray LiDAR fan. It reports the nearest non-flat relief plus signed left/right
+height, allowing the policy to change speed before a low cable or basin reaches
+the caster wheels. Every lockstep policy step requires a fresh preview; the
+hazard's hidden spawn coordinates are not passed to the actor.
 
 For the actor and critic separately:
 
@@ -64,8 +71,9 @@ s=(a_s+1)/2,\quad
 \]
 
 The controller scales the Nav2 reference, calculates PI wheel torque, adds
-residuals and applies torque/speed/slew/watchdog guards. PI is limited to 2 Nm
-per wheel; the nominal residual envelope is 0.5 Nm per wheel. A true zero
+residuals and applies torque/speed/slew/watchdog guards. The active simulation
+config limits PI to 4 Nm per wheel and the residual action to 2 Nm per wheel;
+the final actuator safety limit and slew limiter still apply. A true zero
 speed-scale command blocks residual drive. The existing in-place-turn scale
 floor and filtered scaling remain. This is not direct unsupported balancing.
 
@@ -93,24 +101,25 @@ The total reward is the sum of these terms:
 
 | Term | Formula/default |
 |---|---|
-| Signed progress | \(20(d_{t-1}-d_t)\) |
-| Lateral | \(-0.8h C(e_y/0.30)\) |
-| Heading | \(-0.2h C(e_\psi/0.35)\) |
-| Linear reference tracking | \(-w_v h K(v-v_{ref},0.20)\) |
+| Signed progress | \(20(d_{t-1}-d_t)\), gated by path alignment for forward motion |
+| Lateral | \(-0.50h C(e_y/0.25)\) |
+| Heading | \(-0.25h C(e_\psi/0.35)\) |
+| Linear reference tracking | \(-w_v h K(v-v_{ref},1.20)\) |
 | Yaw reference tracking | \(-0.15h K(\omega-\omega_{ref},0.50)\) |
 | Impact | \(-0.05 q\int \min((|a_z^w|/2)^4,81)dt/0.1\) |
 | Body rates | \(-0.05h[C(\dot\phi)+C(\dot\theta)]\) |
 | Excess tilt | \(-0.5h[C((|\phi|-0.20)_+/0.15)+C((|\theta|-0.30)_+/0.15)]\) |
 | Wheel slip | \(-0.1h\sum_{L,R} C(\mathrm{slip}/0.30)\) |
 | Action change | \(-0.02\|a_t-a_{t-1}\|^2/h\) |
-| Total effort | \(-0.04h\operatorname{mean}((\tau/2.5)^2)\) |
+| Total effort | \(-0.04h\operatorname{mean}((\tau/5.0)^2)\) |
 | Residual effort | \(-0.005h\operatorname{mean}((\delta\tau/0.5)^2)\) |
-| Total torque change | \(-0.02\operatorname{mean}(((\tau_t-\tau_{t-1})/2.5)^2)/h\) |
-| **Operating-envelope saturation (new)** | \(-0.03h\operatorname{mean}[\mathrm{clip}((|\tau|/2.5-0.9)/0.1,0,1)^2]\) |
-| Goal braking | \(-0.15h e^{-(d_{end}/0.8)^2}[C(v/0.20)+C(\omega/0.30)]\) |
+| Total torque change | \(-0.02\operatorname{mean}(((\tau_t-\tau_{t-1})/5.0)^2)/h\) |
+| **Operating-envelope saturation** | \(-0.03h\operatorname{mean}[\mathrm{clip}((|\tau|/5.0-0.9)/0.1,0,1)^2]\) |
+| Goal braking | \(-0.15h e^{-(d_{end}/0.8)^2}[C(v/1.20)+C(\omega/0.30)]\) |
 | Time | \(-0.01h\) |
 | Stall | \(-0.5h\) when the existing 3-second progress window flags a stall |
-| Terminal | +100 success; -100 collision/rollover/wrong direction; -75 off path; -50 deadline |
+| On-time success | up to +50, proportional to positive margin before the 15-second target |
+| Terminal | +100 success; -100 collision/rollover/wrong direction; -75 off path; deadline \(-100[0.5+0.5(1-c)]\) |
 
 Here \(q=\min(1,0.25+(phase-1)/5)\), \((x)_+=\max(0,x)\), and
 \(w_v=0.40\) for overspeed in the commanded direction or movement under a
@@ -119,8 +128,8 @@ action and is not scaled by the actor, so stopping does not erase its own
 tracking error. Gazebo truth speeds affect reward only. Reward terms are logged
 individually in TensorBoard.
 
-The new saturation term is zero below 2.25 Nm and reaches -0.03 per 0.1-second
-step when both wheels reach 2.5 Nm. This is the effective PI-plus-residual
+The saturation term is zero below 4.5 Nm and reaches -0.03 per 0.1-second
+step when both wheels reach 5.0 Nm. This is the effective PI-plus-residual
 operating envelope, not the URDF's 12 Nm hard joint limit. Torque squared is an
 effort/heating proxy, not measured electrical energy. These are initial weights,
 not empirically optimized weights; use matched evaluations to tune them.
@@ -131,9 +140,8 @@ claim. Path lateral error now uses the true perpendicular component; separate
 endpoint/path-distance metrics measure longitudinal overshoot. Reprojection
 of the fixed episode path retains current AMCL transforms.
 
-A successful arrival must satisfy all default tolerances: endpoint ≤0.45 m,
-|lateral| ≤0.25 m, |heading| ≤12°, speed ≤0.20 m/s, yaw rate ≤0.30 rad/s,
-and roll/pitch ≤10°. Rollover threshold is 35°. The 120-second mission deadline
+A successful arrival must be inside the 0.10 m endpoint circle with
+|heading| ≤12°. Rollover threshold is 35°. The 20-second mission deadline
 is a task terminal (`terminated=True`), not an external time-limit truncation.
 Failure overrides success, which overrides timeout. Sensor/transport failures
 abort the run rather than becoming learned collision penalties.
@@ -161,7 +169,7 @@ abort the run rather than becoming learned collision penalties.
 - Randomized evaluation uses full strength. Baseline always has zero residual
   torque. Both evaluators consume the same random draws and use the same
   metrics pipeline, with no competing simultaneous process.
-- Training contract revision 8 includes task, observation and randomization
+- Training contract revision 24 includes task, observation and randomization
   settings, while permitting phase changes, seed/device changes and terrain
   curriculum adjustments. Incompatible resumes fail instead of silently
   changing the learning objective. Run metadata records software and GPU.

@@ -47,6 +47,11 @@ AMCL_POSE_QOS = QoSProfile(
     durability=DurabilityPolicy.TRANSIENT_LOCAL,
 )
 
+TERRAIN_SENSOR_HEIGHT_M = 0.2325
+TERRAIN_SENSOR_PITCH_RAD = 0.45
+TERRAIN_HEIGHT_THRESHOLD_M = 0.006
+TERRAIN_PREVIEW_RANGE_M = 1.0
+
 
 class RosRobotInterface(Node):
     def __init__(
@@ -96,6 +101,9 @@ class RosRobotInterface(Node):
         self.cmd_vel_publisher = self.create_publisher(Twist, cmd_vel_topic, 10)
         self.create_subscription(
             Float64MultiArray, "/nino_rl/terrain_preview", self._preview_callback, 10
+        )
+        self.create_subscription(
+            LaserScan, "/terrain_scan", self._terrain_scan_callback, SENSOR_QOS
         )
         self.create_subscription(Odometry, "/odom", self._odom_callback, 10)
         self.create_subscription(
@@ -419,13 +427,76 @@ class RosRobotInterface(Node):
         with self._lock:
             self._preview = tuple(message.data)
             self._preview_received_at = monotonic()
+            self._mark_received("terrain")
 
-    def terrain_preview(self, timeout=0.5):
+    def _terrain_scan_callback(self, message: LaserScan) -> None:
+        """Convert the downward fan into distance and signed left/right relief."""
+        samples = []
+        for index, value in enumerate(message.ranges):
+            distance = float(value)
+            if (
+                not isfinite(distance)
+                or distance < float(message.range_min)
+                or distance > float(message.range_max)
+            ):
+                continue
+            angle = float(message.angle_min) + index * float(message.angle_increment)
+            horizontal = distance * cos(TERRAIN_SENSOR_PITCH_RAD)
+            forward = horizontal * cos(angle)
+            lateral = horizontal * sin(angle)
+            height = TERRAIN_SENSOR_HEIGHT_M - distance * sin(
+                TERRAIN_SENSOR_PITCH_RAD
+            )
+            if forward > 0.0 and abs(height) >= TERRAIN_HEIGHT_THRESHOLD_M:
+                samples.append((forward, lateral, height))
+
+        def strongest(values) -> float:
+            return float(max(values, key=lambda item: abs(item), default=0.0))
+
+        if samples:
+            preview_distance = min(sample[0] for sample in samples)
+            left_height = strongest(
+                sample[2] for sample in samples if sample[1] >= 0.0
+            )
+            right_height = strongest(
+                sample[2] for sample in samples if sample[1] < 0.0
+            )
+        else:
+            preview_distance = TERRAIN_PREVIEW_RANGE_M
+            left_height = right_height = 0.0
         with self._lock:
-            if monotonic() - self._preview_received_at > timeout:
+            self._preview = (preview_distance, left_height, right_height)
+            self._preview_received_at = monotonic()
+            self._mark_received("terrain")
+
+    def terrain_preview(self, timeout: float | None = 0.5):
+        """Return normalized relief, optionally enforcing wall-time freshness.
+
+        Lockstep training passes ``None`` after its post-step callback barrier:
+        a sample cannot become physically stale while Gazebo is paused. Live
+        deployment retains a finite watchdog timeout.
+        """
+        with self._lock:
+            if (
+                timeout is not None
+                and monotonic() - self._preview_received_at > timeout
+            ):
                 return [0.0, 0.0, 0.0, 0.0]
             distance, left, right = self._preview
-            return [distance / 5.0, left / 0.1, right / 0.1, 1.0]
+            return [
+                distance / TERRAIN_PREVIEW_RANGE_M,
+                left / 0.1,
+                right / 0.1,
+                1.0,
+            ]
+
+    def wait_for_terrain_preview(self, timeout: float = 5.0) -> None:
+        deadline = monotonic() + timeout
+        while monotonic() < deadline:
+            if self.sensor_stream_ready("terrain", timeout):
+                return
+            sleep(0.05)
+        raise TimeoutError("No downward terrain preview scan was received")
 
     def measure_impact(self, start, end, sigma=2.0):
         with self._lock:
@@ -1379,7 +1450,9 @@ class RosRobotInterface(Node):
     def _adaptive_terrain_sdf(
         name: str, features: list[tuple[str, float, float, float]]
     ) -> str:
-        """Build one static model containing side clutter near the cable zone."""
+        """Build one static model containing randomized path hazards."""
+        from math import atan2, cos, pi, sin
+
         links = []
         for index, (kind, x, y, size) in enumerate(features):
             prefix = f"feature_{index}_{kind}"
@@ -1400,21 +1473,40 @@ class RosRobotInterface(Node):
 <geometry><cylinder><radius>{size:.6f}</radius><length>{length:.6f}</length></cylinder></geometry>
 <material><ambient>0.08 0.08 0.08 1</ambient><diffuse>0.12 0.12 0.12 1</diffuse></material></visual>"""
             elif kind == "pothole":
-                # Gazebo's flat box floor cannot be subtracted at runtime. A
-                # dark recessed-looking disc plus a 15 mm segmented rim gives
-                # a pothole-like rough patch if the robot leaves the clear lane.
-                rim_offset = 0.78 * size
-                rim_size = 0.42 * size
+                # Runtime spawning cannot subtract the hall's box floor. Use a
+                # round basin surrogate: 24 overlapping outer/inner ramps make
+                # a 30 mm relative depression with about a 12.5 degree grade.
+                # The 3 mm leading edge and broad 0.60 m diameter are traversable
+                # by the 16 mm casters while still demanding wheel effort.
+                segments = 24
+                ramp_width = 0.45 * size
+                rim_height = 0.10 * size
+                thickness = 0.006
+                slope = atan2(rim_height, ramp_width)
                 rim_parts = []
-                for part, (dx, dy) in enumerate((
-                    (rim_offset, 0.0), (-rim_offset, 0.0),
-                    (0.0, rim_offset), (0.0, -rim_offset),
-                )):
-                    rim_parts.append(f"""
-<collision name='{prefix}_rim_{part}_collision'><pose>{x + dx:.6f} {y + dy:.6f} 0.0075 0 0 0</pose>
-<geometry><box><size>{rim_size:.6f} {rim_size:.6f} 0.015</size></box></geometry></collision>
-<visual name='{prefix}_rim_{part}_visual'><pose>{x + dx:.6f} {y + dy:.6f} 0.0075 0 0 0</pose>
-<geometry><box><size>{rim_size:.6f} {rim_size:.6f} 0.015</size></box></geometry>
+                for part in range(segments):
+                    angle = 2.0 * pi * part / segments
+                    for side, radius, pitch in (
+                        ("outer", size - 0.5 * ramp_width, slope),
+                        ("inner", size - 1.5 * ramp_width, -slope),
+                    ):
+                        cx = x + radius * cos(angle)
+                        cy = y + radius * sin(angle)
+                        tangent_width = 2.10 * max(
+                            size - ramp_width, radius
+                        ) * sin(pi / segments)
+                        pose = (
+                            f"{cx:.6f} {cy:.6f} {0.5 * rim_height:.6f} "
+                            f"0 {pitch:.6f} {angle:.6f}"
+                        )
+                        geometry = (
+                            f"<geometry><box><size>{ramp_width:.6f} "
+                            f"{tangent_width:.6f} {thickness:.6f}</size></box></geometry>"
+                        )
+                        rim_parts.append(f"""
+<collision name='{prefix}_{side}_{part}_collision'><pose>{pose}</pose>{geometry}
+<surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface></collision>
+<visual name='{prefix}_{side}_{part}_visual'><pose>{pose}</pose>{geometry}
 <material><ambient>0.20 0.12 0.05 1</ambient><diffuse>0.28 0.16 0.06 1</diffuse></material></visual>""")
                 body = f"""
 <visual name='{prefix}_depression'><pose>{x:.6f} {y:.6f} 0.001 0 0 0</pose>

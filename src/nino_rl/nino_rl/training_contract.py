@@ -3,15 +3,15 @@ from copy import deepcopy
 
 
 def training_contract(config):
-    return {"revision": 22, **{key: deepcopy(value) for key, value in config.items()
+    return {"revision": 24, **{key: deepcopy(value) for key, value in config.items()
             if key not in ("device", "seed", "curriculum", "terrain_curriculum", "reward")}}
 
 
 def validate_resume(model, config):
     expected = training_contract(config)
     saved = deepcopy(getattr(model, "nino_training_contract", None))
-    # Revision 22 intentionally does not migrate older checkpoints: the small
-    # endpoint circle and center-path randomized hazards define a new task.
+    # Revision 24 intentionally does not migrate older checkpoints: downward
+    # terrain preview and on-time speed learning change the policy task.
     if saved != expected:
         raise ValueError(
             "Checkpoint reward/policy/PPO contract differs or predates this patch. "

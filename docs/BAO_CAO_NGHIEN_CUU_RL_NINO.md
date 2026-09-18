@@ -100,10 +100,13 @@ cũ đến mới tạo vector đầu vào \(s_t\in\mathbb R^{300}\). Một frame
 - vận tốc tham chiếu, hướng tới điểm look-ahead, sai số ngang, khoảng cách tới
   waypoint và đích, roll, pitch, phần thời gian còn lại và cờ tham chiếu hợp lệ;
 - gia tốc thẳng đứng trong hệ world sau khi bù trọng lực;
-- bốn giá trị terrain preview tùy chọn.
+- bốn giá trị terrain preview bắt buộc khi train/evaluate.
 
-Terrain preview hiện không bắt buộc và không có producer thực, nên mặc định là
-0 với cờ invalid. Policy **không nhận** vận tốc ground-truth của Gazebo, slip
+Terrain preview được tạo bởi LiDAR fan 31 tia nhìn chéo xuống, chạy ở 20 Hz.
+Nó cho biết khoảng cách tới phần địa hình khác mặt phẳng và độ cao tương đối
+có dấu bên trái/phải, để policy có thể đổi tốc độ trước khi caster chạm dây hoặc
+lòng chảo. Mỗi bước lockstep yêu cầu scan mới; tọa độ spawn hazard không được
+đưa vào observation. Policy **không nhận** vận tốc ground-truth của Gazebo, slip
 tính từ ground truth hay vị trí dây cáp được sinh tự động. Ground truth chỉ được
 dùng khi tính reward slip và các metric trong mô phỏng. Vì actor và critic PPO
 dùng cùng kiểu quan sát triển khai được, đây không phải kiến trúc asymmetric
@@ -246,8 +249,8 @@ là tổng các thành phần sau:
 | Thành phần | Công thức đang dùng |
 |---|---|
 | Tiến độ | \(20\,\Delta d_{credit}\) |
-| Lệch ngang | \(-4h\,C(e_y/0.10)\) |
-| Sai hướng | \(-2h\,C(e_\psi/0.174533)\) |
+| Lệch ngang | \(-0.50h\,C(e_y/0.25)\) |
+| Sai hướng | \(-0.25h\,C(e_\psi/0.35)\) |
 | Va đập/rung dọc | \(-0.05\,k_{impact}\int\min[(|a_z|/2)^4,81]dt/0.1\) |
 | Tốc độ quay thân | \(-0.05h[C(\omega_x)+C(\omega_y)]\) |
 | Tư thế | phạt roll vượt 0,20 rad và pitch vượt 0,30 rad |
@@ -262,6 +265,7 @@ là tổng các thành phần sau:
 | Phanh gần đích | phạt vận tốc dài và yaw rate, nhân cổng \(\exp[-(d_g/0.8)^2]\) |
 | Thời gian | \(-0.01h\) |
 | Kẹt | \(-0.5h\) nếu tiến dưới 5 cm trong 3 s khi vẫn được lệnh đi tới |
+| Đến sớm | tối đa +50, tỷ lệ với phần thời gian còn lại trước mốc 15 s |
 
 Tỷ số trượt được tính cho từng bánh bằng
 
@@ -279,7 +283,8 @@ hiệu đặc quyền chỉ phục vụ reward/đánh giá trong mô phỏng, kh
 - thành công: +100;
 - rollover, collision, sai hướng hoặc navigation invalid: −100;
 - ra khỏi đường: −75;
-- timeout: \(-50(1-c)\), với \(c\in[0,1]\) là tỷ lệ hoàn thành;
+- timeout: \(-100[0,5+0,5(1-c)]\), với \(c\in[0,1]\) là tỷ lệ hoàn thành;
+- khi thành công trước 15 s, cộng thêm tối đa +50 theo time margin;
 - khi thành công, tiếp tục trừ
   \(-30K(d_g,0.25)-20K(e_\psi,0.20944)\).
 
@@ -345,13 +350,17 @@ easy-to-hard thông thường. Nếu bỏ `fixed_phase`, code có thể tự ch�
 tỷ lệ tổng bước `[0; 0,15; 0,30; 0,50; 0,70; 0,85]`, nhưng đó không phải chế độ
 đang dùng.
 
-**Adaptive terrain tăng độ phức tạp sau thành công.** Ban đầu có 0 feature phụ.
-Sau mỗi episode thành công, môi trường thêm một feature, tối đa 20, luân phiên
-giữa pothole, obstacle và cable ngắn trong vùng \(x=1,2\ldots5,2\) m. Thứ tự
-loại, tọa độ dọc và độ lệch ngang được lấy mẫu lại mỗi episode theo seed; tâm
-feature cách đường chuẩn không quá 0,10 m. Vì vậy đường đi thẳng giao với các
-hazard và policy phải học phản ứng/né tránh. Khi đánh giá, số feature được đóng
-băng ở 20 nhưng layout vẫn được random hóa theo seed để so sánh công bằng.
+**Adaptive terrain dùng rolling gate.** Training bắt đầu với 1 feature phụ. Chỉ
+khi 50 episode gần nhất tại level hiện tại đạt ít nhất 75% success, môi trường
+mới thêm một feature, tối đa 8. Cửa sổ rolling, số episode và level hiện tại
+được lưu trong checkpoint nên resume không quay về mức dễ. Pothole, obstacle và
+cable ngắn nằm trong vùng \(x=1,2\ldots5,2\) m; thứ tự loại, tọa độ dọc và độ
+lệch ngang được lấy mẫu lại mỗi episode theo seed. Tâm feature cách đường chuẩn
+không quá 0,10 m, vì vậy policy phải học phản ứng/né tránh. Khi đánh giá, số
+feature được đóng băng ở 8 nhưng layout vẫn được random hóa theo seed. Pothole
+là lòng chảo tròn đường kính 0,60 m, sâu tương đối 30 mm, có dốc vào/ra khoảng
+12,5° và mép đầu khoảng 3 mm để caster 16 mm có thể đi qua. Do sàn phẳng runtime
+không thể bị trừ hình học, đây là basin gồ có đáy ở mặt sàn chứ không phải hố âm.
 
 Domain randomization hiện **tắt**. Nếu bật có chủ đích, nó mới thêm thay đổi ở
 kênh residual và cảm biến như delay, torque noise, traction scale, nhiễu/bias
@@ -392,8 +401,8 @@ Rollout đang thu dở tại thời điểm lỗi hoặc Ctrl-C không được 
 “unfinished rollout is discarded on resume” là hành vi đúng của PPO on-policy,
 không có nghĩa là toàn bộ policy đã mất. Chỉ nên resume checkpoint có training
 contract tương thích và dùng YAML được lưu cùng run. Contract hiện tại là
-revision 22; do điều kiện đích và phân bố hazard đã đổi, checkpoint cũ không
-được resume để tránh trộn hai bài toán huấn luyện khác nhau.
+revision 24; do terrain preview, speed reward và rolling curriculum đã đổi, checkpoint cũ
+không được resume để tránh trộn hai bài toán huấn luyện khác nhau.
 
 ## 10. Thiết kế đánh giá
 
@@ -419,12 +428,13 @@ không rollover/collision, P95 sai số đường trong giới hạn đã thốn
 ## 11. Giới hạn và hướng phát triển
 
 - Policy mới được xác thực trong mô phỏng; chưa thể suy ra khả năng sim-to-real.
-- LiDAR 2D ngang không đảm bảo nhìn thấy dây cáp thấp từ xa, nên hành vi hiện
-  thiên về phản ứng từ history/IMU hơn là chủ động dự báo địa hình.
+- Terrain LiDAR nhìn chéo xuống đã tạo preview chủ động trong mô phỏng; khi đưa
+  lên robot thật phải có cảm biến/hình học hiệu chuẩn tương đương, nếu không
+  observation sẽ không tương thích checkpoint.
 - Slip reward dựa vào ground truth chỉ tồn tại trong mô phỏng; actor không phụ
   thuộc tín hiệu này, nhưng reward cần được thiết kế lại hoặc ước lượng khi fine
   tune trên robot thật.
-- Adaptive feature là hazard runtime xấp xỉ (pothole dùng vành gồ trên sàn phẳng,
+- Adaptive feature là hazard runtime xấp xỉ (pothole dùng basin tròn trên sàn phẳng,
   không phải phép trừ mesh tạo hố thật), nên vẫn cần kiểm chứng thêm bằng terrain
   mesh và nhiều seed trước khi suy luận sang robot thật.
 - Domain randomization chưa mô hình hóa thay đổi vật lý đầy đủ như ma sát, tải,
@@ -434,7 +444,7 @@ không rollover/collision, P95 sai số đường trong giới hạn đã thốn
 
 Các bước tiếp theo nên là đánh giá nhiều seed, chọn checkpoint tốt nhất thay vì
 mặc định checkpoint cuối, kiểm tra ablation từng nhóm reward, bổ sung terrain
-preview từ cảm biến có thể triển khai thật, rồi mới thử sim-to-real với giới hạn
+  preview trên phần cứng thực, rồi mới thử sim-to-real với giới hạn
 mô-men/tốc độ bảo thủ và nút dừng khẩn cấp.
 
 ## 12. Cấu hình tái lập chính

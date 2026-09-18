@@ -1,5 +1,6 @@
 """Behavioral tests for staged perturbations, torque envelope and frame transforms."""
 import ast
+from collections import deque
 from copy import deepcopy
 from math import cos, sin
 from pathlib import Path
@@ -87,6 +88,87 @@ def test_adaptive_terrain_randomizes_mixed_features_across_path():
         assert abs(y) <= 0.10
         assert abs(y) + size < 1.80
     assert generated != regenerated
+
+
+def test_adaptive_terrain_advances_only_after_rolling_success_gate():
+    record = method('ros_env.py', '_record_adaptive_terrain_outcome', dict(np=np))
+    env = SimpleNamespace(
+        adaptive_terrain_progress=True,
+        terrain_success_window=deque(maxlen=4),
+        terrain_success_window_size=4,
+        terrain_advance_success_rate=.75,
+        terrain_episodes_at_level=0,
+        terrain_feature_count=1,
+        terrain_features_per_success=1,
+        max_terrain_features=20,
+    )
+    assert record(env, True) == (1.0, 1, False)
+    assert record(env, False) == (.5, 2, False)
+    assert record(env, True) == pytest.approx((2 / 3, 3, False))
+    assert record(env, True) == (.75, 4, True)
+    assert env.terrain_feature_count == 2
+    assert env.terrain_episodes_at_level == 0
+    assert not env.terrain_success_window
+
+
+def test_adaptive_terrain_checkpoint_state_round_trip():
+    state = method('ros_env.py', 'adaptive_terrain_state', {})
+    restore = method('ros_env.py', 'restore_adaptive_terrain_state', {})
+    source = SimpleNamespace(
+        terrain_feature_count=3,
+        successful_episodes=41,
+        terrain_episodes_at_level=12,
+        terrain_success_window=deque([True, False, True], maxlen=50),
+    )
+    saved = state(source)
+    target = SimpleNamespace(
+        max_terrain_features=20,
+        terrain_success_window_size=50,
+        terrain_success_window=deque(maxlen=50),
+    )
+    restore(target, saved)
+    assert state(target) == saved
+
+
+def test_downward_scan_produces_advance_terrain_preview():
+    callback = method(
+        'ros_interface.py', '_terrain_scan_callback',
+        dict(
+            LaserScan=object,
+            isfinite=np.isfinite,
+            cos=cos,
+            sin=sin,
+            monotonic=lambda: 10.0,
+            TERRAIN_SENSOR_HEIGHT_M=.2325,
+            TERRAIN_SENSOR_PITCH_RAD=.45,
+            TERRAIN_HEIGHT_THRESHOLD_M=.006,
+            TERRAIN_PREVIEW_RANGE_M=1.0,
+        ),
+    )
+    flat_range = .2325 / sin(.45)
+    raised_range = (.2325 - .03) / sin(.45)
+    message = SimpleNamespace(
+        ranges=[flat_range, raised_range, flat_range],
+        range_min=.05,
+        range_max=2.0,
+        angle_min=-.1,
+        angle_increment=.1,
+    )
+    class Lock:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+    received = []
+    ros = SimpleNamespace(
+        _lock=Lock(),
+        _preview=None,
+        _preview_received_at=0.0,
+        _mark_received=received.append,
+    )
+    callback(ros, message)
+    assert ros._preview[0] < .5
+    assert ros._preview[1] == pytest.approx(.03)
+    assert ros._preview[2] == 0.0
+    assert received == ["terrain"]
 
 
 def test_operating_envelope_saturation_cost_and_dt():

@@ -74,7 +74,7 @@ def run(baseline=False):
     adaptive = config.get("adaptive_terrain", {})
     if adaptive.get("enabled", False):
         adaptive["progress_on_success"] = False
-        adaptive["initial_features"] = int(adaptive.get("evaluation_features", 20))
+        adaptive["initial_features"] = int(adaptive.get("evaluation_features", 8))
     model = None
     if not baseline:
         import torch

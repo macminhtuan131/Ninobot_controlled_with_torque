@@ -130,7 +130,7 @@ class RewardTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "NEW run"):
             validate_resume(SimpleNamespace(), CONFIG)
 
-    def test_pre_revision_22_checkpoint_is_rejected_for_new_task(self):
+    def test_pre_revision_24_checkpoint_is_rejected_for_new_task(self):
         legacy = training_contract(CONFIG)
         legacy["revision"] = 21
         model = SimpleNamespace(nino_training_contract=legacy)
@@ -200,11 +200,22 @@ class PolicyTests(unittest.TestCase):
         self.assertFalse(th.equal(before, model.policy.action_net.weight))
         self.assertTrue(all(th.isfinite(p).all() for p in model.policy.parameters()))
         model.nino_training_contract = training_contract(config)
+        model.nino_adaptive_terrain_state = {
+            "schema_version": 1,
+            "terrain_feature_count": 2,
+            "successful_episodes": 41,
+            "episodes_at_level": 12,
+            "rolling_outcomes": [1, 0, 1],
+        }
         with TemporaryDirectory() as directory:
             path = Path(directory) / "policy.zip"
             model.save(path)
             restored = PPO.load(path, device="cpu")
             validate_resume(restored, config)
+            self.assertEqual(
+                restored.nino_adaptive_terrain_state,
+                model.nino_adaptive_terrain_state,
+            )
             np.testing.assert_allclose(restored.predict(observation, deterministic=True)[0],
                                        model.predict(observation, deterministic=True)[0], atol=1e-7)
             restored.set_env(ContractEnv())

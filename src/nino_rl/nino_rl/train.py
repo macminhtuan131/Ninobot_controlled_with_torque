@@ -123,6 +123,13 @@ def main() -> None:
                         "rms_vertical_acceleration_m_s2",
                         "adaptive_terrain_features",
                         "next_adaptive_terrain_features",
+                        "adaptive_terrain_rolling_success",
+                        "adaptive_terrain_window_episodes",
+                        "adaptive_terrain_level_advanced",
+                        "mean_speed_scale",
+                        "min_speed_scale",
+                        "max_speed_scale",
+                        "mean_ground_speed_m_s",
                     ):
                         self.logger.record_mean(f"episode/{name}", float(metrics[name]))
             return True
@@ -135,6 +142,17 @@ def main() -> None:
             for name, values in self.reward_terms.items():
                 if values:
                     self.logger.record(f"reward_terms/{name}", float(np.mean(values)))
+
+    def sync_adaptive_terrain_state(model, environment) -> None:
+        model.nino_adaptive_terrain_state = environment.adaptive_terrain_state()
+
+    class AdaptiveCheckpointCallback(CheckpointCallback):
+        """Keep rolling curriculum progress inside each normal PPO checkpoint."""
+
+        def _on_step(self) -> bool:
+            if self.n_calls % self.save_freq == 0:
+                sync_adaptive_terrain_state(self.model, env)
+            return super()._on_step()
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     run_dir = args.output.expanduser().resolve() / stamp
@@ -157,13 +175,18 @@ def main() -> None:
     env = NinoGazeboEnv(config, total_training_steps=args.timesteps)
     try:
         if args.check_env:
+            initial_adaptive_state = env.adaptive_terrain_state()
             check_env(env, warn=True)
+            env.restore_adaptive_terrain_state(initial_adaptive_state)
         monitored = Monitor(env, filename=str(run_dir / "monitor.csv"))
         ppo = config["ppo"]
         if args.resume:
             model = PPO.load(args.resume, device=device)
             validate_model(model, env.history.size)
             validate_resume(model, config)
+            env.restore_adaptive_terrain_state(
+                getattr(model, "nino_adaptive_terrain_state", None)
+            )
             model.set_env(monitored)
             model.tensorboard_log = str(tensorboard_dir)
             env.global_steps = int(model.num_timesteps)
@@ -192,15 +215,17 @@ def main() -> None:
                 verbose=1,
             )
             model.nino_training_contract = training_contract(config)
+            sync_adaptive_terrain_state(model, env)
             reset_num_timesteps = True
 
-        checkpoint_callback = CheckpointCallback(
+        checkpoint_callback = AdaptiveCheckpointCallback(
             save_freq=max(1, int(args.checkpoint_every)),
             save_path=str(checkpoint_dir),
             name_prefix="nino_ppo",
             save_replay_buffer=False,
             save_vecnormalize=True,
         )
+        sync_adaptive_terrain_state(model, env)
         print(f"Bắt đầu train trên {model.device}; kết quả: {run_dir}")
         model.learn(
             total_timesteps=args.timesteps,
@@ -209,17 +234,20 @@ def main() -> None:
             progress_bar=False,
         )
         final_path = run_dir / "nino_ppo_final"
+        sync_adaptive_terrain_state(model, env)
         model.save(final_path)
         print(f"Đã lưu policy: {final_path}.zip")
     except KeyboardInterrupt:
         if "model" in locals():
             interrupted = run_dir / "nino_ppo_interrupted"
+            sync_adaptive_terrain_state(model, env)
             model.save(interrupted)
             print(f"Saved {interrupted}.zip; unfinished rollout is discarded on resume.")
         print("Training interrupted cleanly; robot stopped and simulator released.")
     except (RuntimeError, TimeoutError):
         if "model" in locals():
             interrupted = run_dir / "nino_ppo_interrupted"
+            sync_adaptive_terrain_state(model, env)
             model.save(interrupted)
             print(f"Saved {interrupted}.zip; unfinished rollout is discarded on resume.")
         raise

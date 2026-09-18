@@ -102,6 +102,58 @@
     <origin xyz="0.10 0 0.18" rpy="0 0 0"/>
   </joint>
 
+  <!-- A shallow downward-looking scan gives the policy deployable preview of
+       low cables and terrain before the casters reach them. It is mounted
+       just beyond the 0.31 m CAD chassis nose so the robot cannot occlude its
+       rays. At 0.2325 m height and 0.45 rad pitch it observes the floor about
+       0.48 m ahead; the horizontal fan distinguishes left/right terrain. -->
+  <link name="terrain_laser">
+    <visual>
+      <geometry><box size="0.035 0.055 0.025"/></geometry>
+      <material name="sensor_green"/>
+    </visual>
+  </link>
+  <joint name="terrain_laser_to_base_link" type="fixed">
+    <parent link="base_link"/>
+    <child link="terrain_laser"/>
+    <origin xyz="0.33 0 0.17" rpy="0 0.45 0"/>
+  </joint>
+
+  <gazebo reference="terrain_laser">
+    <sensor name="terrain_preview_sensor" type="gpu_lidar">
+      <topic>terrain_scan</topic>
+      <update_rate>20</update_rate>
+      <always_on>true</always_on>
+      <visualize>false</visualize>
+      <lidar>
+        <scan>
+          <horizontal>
+            <samples>31</samples>
+            <resolution>1</resolution>
+            <min_angle>-0.35</min_angle>
+            <max_angle>0.35</max_angle>
+          </horizontal>
+          <vertical>
+            <samples>1</samples>
+            <resolution>1</resolution>
+            <min_angle>0</min_angle>
+            <max_angle>0</max_angle>
+          </vertical>
+        </scan>
+        <range>
+          <min>0.05</min>
+          <max>2.0</max>
+          <resolution>0.002</resolution>
+        </range>
+        <noise>
+          <type>gaussian</type>
+          <mean>0</mean>
+          <stddev>0.002</stddev>
+        </noise>
+      </lidar>
+    </sensor>
+  </gazebo>
+
   <gazebo>
     <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
     <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">

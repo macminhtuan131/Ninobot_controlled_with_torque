@@ -17,7 +17,7 @@ inverted pendulum. CUDA training is the default.
 4. Use `trajectory_metrics` for custom geometric or timestamped references and
    `compare_evaluations` for compatible baseline/PPO summaries.
 
-Training contract revision 9 requires a fresh run after this patch. Later phase
-changes can resume revision-9 checkpoints. The older `ALGORITHM_V2.md` and
+Training contract revision 24 requires a fresh run after this patch. Later phase
+changes can resume revision-24 checkpoints. The older `ALGORITHM_V2.md` and
 `REWARD_POLICY_UPDATE.md` describe historical revisions; current defaults and
 commands are in the root README and RL_IMPROVEMENTS.md.

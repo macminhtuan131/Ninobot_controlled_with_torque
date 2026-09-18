@@ -40,7 +40,7 @@ def make_observation(state, path, lookahead, previous_action, nav_reference=None
     _, torque = decode_action(previous_action, 1.0)
     legacy, tracking = legacy_observation(state, path, lookahead, torque, nav_reference)
     # Drop indices 50,51: slip computed using simulator-only truth velocity.
-    # Preview is [distance/5m, left height/0.1m, right height/0.1m, valid].
+    # Preview is [distance/1m, left height/0.1m, right height/0.1m, valid].
     terrain = np.zeros(4) if preview is None else np.asarray(preview)
     observation = np.concatenate((legacy[:50], legacy[52:], previous_action,
                                   [vertical_acceleration(state, includes_gravity) / 10.0],
@@ -171,7 +171,8 @@ def compute_reward(previous, current, state, action, previous_action, torque,
                    dt, imu, cfg, *, succeeded=False, failed=None,
                    timed_out=False, stalled=False, impact_scale=1.0,
                    reference=None, previous_state=None,
-                   completion_fraction=0.0):
+                   completion_fraction=0.0, elapsed=None,
+                   target_finish_seconds=None):
     """AMR reward with v2 I/O; see REWARD_POLICY_UPDATE.md for the objective.
 
     Tracking uses an unscaled pre-action baseline reference and simulation truth
@@ -256,6 +257,7 @@ def compute_reward(previous, current, state, action, previous_action, torque,
         "stall": -h * cfg["stall_penalty"] if stalled else 0.0,
         "success_position": 0.0,
         "success_heading": 0.0,
+        "on_time_success": 0.0,
         "terminal": 0.0,
     }
     # Failure has precedence, including at a goal or time limit.
@@ -275,12 +277,26 @@ def compute_reward(previous, current, state, action, previous_action, torque,
             current.heading_error,
             cfg.get("success_heading_sigma_rad", 0.21),
         )
+        if elapsed is not None and target_finish_seconds is not None:
+            target = float(target_finish_seconds)
+            if not np.isfinite(target) or target <= 0.0:
+                raise ValueError("target_finish_seconds must be positive and finite")
+            time_margin = float(np.clip(
+                (target - float(elapsed)) / target, 0.0, 1.0
+            ))
+            terms["on_time_success"] = (
+                cfg.get("on_time_success_bonus", 0.0) * time_margin
+            )
     elif timed_out:
         completion = float(np.clip(completion_fraction, 0.0, 1.0))
-        remaining = 1.0 - completion if cfg.get(
-            "timeout_completion_scaling", False
-        ) else 1.0
-        terms["terminal"] = -cfg["timeout_penalty"] * remaining
+        if cfg.get("timeout_completion_scaling", False):
+            minimum = float(cfg.get("timeout_minimum_fraction", 0.0))
+            if not 0.0 <= minimum <= 1.0:
+                raise ValueError("timeout_minimum_fraction must be in [0, 1]")
+            timeout_scale = minimum + (1.0 - minimum) * (1.0 - completion)
+        else:
+            timeout_scale = 1.0
+        terms["terminal"] = -cfg["timeout_penalty"] * timeout_scale
     reward = float(sum(terms.values()))
     if not np.isfinite(reward):
         raise ValueError("Non-finite v2 reward")

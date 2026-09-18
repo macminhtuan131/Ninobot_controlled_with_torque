@@ -27,11 +27,12 @@ discovery, preventing another machine or simulator from injecting a conflicting
 - [Bài viết nghiên cứu tổng quan bằng tiếng Việt](docs/BAO_CAO_NGHIEN_CUU_RL_NINO.md)
 - [Simulation and hardware reference](docs/HARDWARE_REFERENCE.md)
 
-The current training contract is revision 22. Because its endpoint and hazard
-semantics changed, older training checkpoints cannot be resumed; start a new
-run. Old models may still be used for inference with their matching config.
-Old 54-input/2-action models are incompatible. No pretrained weights or
-measured performance gains are included.
+The current training contract is revision 24. Because its reward balance,
+downward terrain preview and rolling hazard curriculum changed, older checkpoints cannot be
+resumed; start a new run. New checkpoints retain rolling curriculum state, so
+resume no longer resets hazard difficulty. Old models may still be used for
+inference with their matching config. Old 54-input/2-action models are
+incompatible. No pretrained weights or measured performance gains are included.
 
 ## 1. Prepare Ubuntu and the NVIDIA GPU
 
@@ -192,11 +193,29 @@ at `x=4 m`, leaving 2 m for recovery and drift measurement before the 6 m goal.
 With `headless:=false`, Gazebo displays the goal as a bright green disc, pole,
 and flag. The marker is visual-only and cannot collide with the robot or LiDAR.
 
-After each successful episode, one extra hazard is added, cycling through
-pothole-like rough patches, obstacles, and short cables until 20 are present.
-Their type order and positions are randomized per episode inside the training
-zone, with centers within 10 cm of the nominal path so driving straight cannot
-simply bypass them.
+Training starts with one hazard. One more is added only when the latest 50
+episodes at that level reach at least 75% success. Rolling results and the
+current hazard count are stored in every regular, final, and interrupted
+checkpoint. Pothole-like patches, obstacles, and short cables are randomized
+per episode inside the training zone, with centers within 10 cm of the nominal
+path so driving straight cannot simply bypass them. The curriculum tops out at
+eight hazards to avoid overlapping the broad bowls inside the four-metre zone.
+
+Speed is a learned continuous action: PPO scales the 0.75 m/s straight
+reference from 0 to 100% on every 0.1 s policy step. A 20 Hz downward-looking
+LiDAR fan provides a fresh, deployable preview of low cable/terrain relief, in
+addition to the forward safety LiDAR. Successful arrival before the 15 s target
+earns a proportional bonus, while impact, slip, torque, timeout, and path terms
+prevent "always full speed" from being the only useful strategy. TensorBoard
+records mean/min/max speed scale and mean ground speed for every episode.
+
+The randomized pothole is a 0.60 m round, 30 mm-deep relative basin with smooth
+approximately 12.5-degree entry/exit ramps and a roughly 3 mm leading edge. It
+is sized to admit the 16 mm caster wheels while still requiring useful drive
+effort. Gazebo cannot subtract a randomly spawned shape from the existing flat
+floor, so this is an annular raised-basin surrogate rather than a literal hole
+below the hall floor; a true excavated hole would require replacing the floor
+with a pre-cut mesh or heightmap.
 
 Terminal A:
 
@@ -401,6 +420,7 @@ PYTHONPATH=src/nino_rl python -m nino_rl.trajectory_metrics --help
 
 This patch does not introduce SWAE, a 3D terrain map, an ESKF, Isaac Lab,
 asymmetric privileged critics, or unvalidated slope balancing. The existing
-optional terrain-preview input remains invalid/zero without a real producer.
-See the design note for the selection rationale and exact reward. Hardware
-transfer needs separate validation; the included simulator cannot establish it.
+terrain-preview input is now driven by the simulated downward LiDAR. Hardware
+deployment requires an equivalent calibrated producer; simulation alone cannot
+establish transfer performance. See the design note for the selection rationale
+and exact reward.

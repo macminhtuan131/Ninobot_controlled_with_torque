@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from copy import deepcopy
 from math import ceil, degrees
 from threading import Event, Thread
@@ -117,6 +118,8 @@ class NinoGazeboEnv(gym.Env):
         self.executor_thread = Thread(target=self._spin_executor, daemon=True)
         self.executor_thread.start()
         self.ros.wait_for_sensors(self.sensor_timeout)
+        if config["policy_v2"].get("require_terrain_preview", False):
+            self.ros.wait_for_terrain_preview(self.sensor_timeout)
 
         self.global_steps = 0
         self.attempt_number = 0
@@ -146,18 +149,30 @@ class NinoGazeboEnv(gym.Env):
         self.adaptive_terrain_progress = bool(
             adaptive.get("progress_on_success", True)
         )
-        self.max_terrain_features = int(adaptive.get("max_features", 20))
+        self.max_terrain_features = int(adaptive.get("max_features", 8))
         self.terrain_features_per_success = int(
-            adaptive.get("add_per_success", 1)
+            adaptive.get("add_per_level", adaptive.get("add_per_success", 1))
+        )
+        self.terrain_success_window_size = int(
+            adaptive.get("rolling_window_episodes", 50)
+        )
+        self.terrain_advance_success_rate = float(
+            adaptive.get("advance_success_rate", 0.75)
         )
         self.terrain_feature_count = int(adaptive.get("initial_features", 0))
         if (
             self.max_terrain_features < 0
-            or self.terrain_features_per_success < 0
+            or self.terrain_features_per_success <= 0
+            or self.terrain_success_window_size < 1
+            or not 0.0 < self.terrain_advance_success_rate <= 1.0
             or not 0 <= self.terrain_feature_count <= self.max_terrain_features
         ):
             raise ValueError("adaptive terrain feature counts are invalid")
         self.successful_episodes = 0
+        self.terrain_episodes_at_level = 0
+        self.terrain_success_window = deque(
+            maxlen=self.terrain_success_window_size
+        )
         self.path = self._make_curriculum_path()
         self.previous_action = BASELINE_ACTION.copy()
         self.action_before_previous = BASELINE_ACTION.copy()
@@ -178,6 +193,10 @@ class NinoGazeboEnv(gym.Env):
         self.torque_square_sum = 0.0
         self.max_abs_torque = 0.0
         self.accel_square_sum = 0.0
+        self.speed_scale_sum = 0.0
+        self.min_speed_scale = 1.0
+        self.max_speed_scale = 0.0
+        self.ground_speed_sum = 0.0
         self.waypoint_arrival_times: list[float] = []
         self.waypoint_targets = np.asarray([], dtype=np.float64)
         self.next_waypoint_index = 0
@@ -272,8 +291,13 @@ class NinoGazeboEnv(gym.Env):
         count = max(1, self.terrain_feature_count)
         for index in range(self.terrain_feature_count):
             kind = kinds[index % len(kinds)]
-            size = (0.18 if kind == "pothole" else
-                    0.12 if kind == "obstacle" else 0.015)
+            size = (
+                float(config.get("pothole_radius_m", 0.30))
+                if kind == "pothole"
+                else float(config.get("obstacle_radius_m", 0.12))
+                if kind == "obstacle"
+                else float(config.get("cable_radius_m", 0.015))
+            )
             # Stratification prevents a random pile-up while the jitter and
             # lateral offset produce a new, seed-reproducible layout each episode.
             fraction = (index + self.np_random.uniform(0.15, 0.85)) / count
@@ -281,6 +305,63 @@ class NinoGazeboEnv(gym.Env):
             y = self.np_random.uniform(-max_center_offset, max_center_offset)
             features.append((kind, float(x), float(y), float(size)))
         return features
+
+    def adaptive_terrain_state(self) -> dict:
+        """Return checkpoint-safe rolling curriculum state."""
+        return {
+            "schema_version": 1,
+            "terrain_feature_count": self.terrain_feature_count,
+            "successful_episodes": self.successful_episodes,
+            "episodes_at_level": self.terrain_episodes_at_level,
+            "rolling_outcomes": [int(value) for value in self.terrain_success_window],
+        }
+
+    def restore_adaptive_terrain_state(self, state: dict) -> None:
+        """Restore curriculum progress saved alongside a PPO checkpoint."""
+        if not isinstance(state, dict) or state.get("schema_version") != 1:
+            raise ValueError("Checkpoint is missing valid adaptive terrain state")
+        count = int(state.get("terrain_feature_count", -1))
+        successes = int(state.get("successful_episodes", -1))
+        episodes = int(state.get("episodes_at_level", -1))
+        outcomes = list(state.get("rolling_outcomes", []))
+        if (
+            not 0 <= count <= self.max_terrain_features
+            or successes < 0
+            or episodes < 0
+            or len(outcomes) > self.terrain_success_window_size
+            or any(value not in (0, 1, False, True) for value in outcomes)
+        ):
+            raise ValueError("Checkpoint adaptive terrain state is invalid")
+        self.terrain_feature_count = count
+        self.successful_episodes = successes
+        self.terrain_episodes_at_level = episodes
+        self.terrain_success_window.clear()
+        self.terrain_success_window.extend(bool(value) for value in outcomes)
+
+    def _record_adaptive_terrain_outcome(
+        self, succeeded: bool
+    ) -> tuple[float, int, bool]:
+        """Update the rolling gate and return rate, sample count and advance."""
+        if not self.adaptive_terrain_progress:
+            return 0.0, 0, False
+        self.terrain_success_window.append(bool(succeeded))
+        self.terrain_episodes_at_level += 1
+        window_episodes = len(self.terrain_success_window)
+        rolling_success = float(np.mean(self.terrain_success_window))
+        level_advanced = False
+        if (
+            window_episodes == self.terrain_success_window_size
+            and rolling_success >= self.terrain_advance_success_rate
+            and self.terrain_feature_count < self.max_terrain_features
+        ):
+            self.terrain_feature_count = min(
+                self.max_terrain_features,
+                self.terrain_feature_count + self.terrain_features_per_success,
+            )
+            self.terrain_success_window.clear()
+            self.terrain_episodes_at_level = 0
+            level_advanced = True
+        return rolling_success, window_episodes, level_advanced
 
     def _sample_randomization(self) -> None:
         cfg = self.config["domain_randomization"]
@@ -352,8 +433,10 @@ class NinoGazeboEnv(gym.Env):
         )
 
     def _actor_observation(self, state, action, reference):
-        preview = self.ros.terrain_preview(
-            self.config["policy_v2"]["preview_timeout_seconds"])
+        # reset() and step() both enforce a new terrain callback barrier before
+        # reaching this method. Wall time may then pass while physics remains
+        # paused, which does not make the observed terrain physically stale.
+        preview = self.ros.terrain_preview(timeout=None)
         if self.config["policy_v2"]["require_terrain_preview"] and not preview[-1]:
             self.ros.publish_control(0.0, 0.0, 0.0)
             raise RuntimeError("Required terrain preview missing/stale; stopped")
@@ -383,10 +466,6 @@ class NinoGazeboEnv(gym.Env):
         self._last_noisy_state = None
         self._sample_randomization()
         stage, level, goal_x = self._curriculum_stage()
-        # Entity reset/spawn services can temporarily block Gazebo publishers.
-        # Record the mandatory truth stream before changing the world, then
-        # require a callback generated after those operations complete.
-        ground_truth_marker = self.ros.sensor_markers(["ground_truth"])
         self.ros.reset_episode(start_pose=self.start_pose)
         episode_cables = self._curriculum_cables(stage)
         self.ros.configure_training_cables(episode_cables)
@@ -395,14 +474,20 @@ class NinoGazeboEnv(gym.Env):
         self.ros.configure_goal_marker(
             self.goal_pose, radius=float(self.config["goal_tolerance_m"])
         )
+        # Entity services can briefly hold Gazebo sensor publishers. Capture
+        # callback markers only after the last world mutation, then require a
+        # view of the completed episode layout and reset pose.
+        reset_sensor_names = ["ground_truth"]
+        if self.config["policy_v2"].get("require_terrain_preview", False):
+            reset_sensor_names.append("terrain")
+        post_mutation_markers = self.ros.sensor_markers(reset_sensor_names)
         self.ros.wait_for_sensors(self.sensor_timeout)
         self.ros.publish_straight_command(0.0)
         self.ros.wait_for_v2_controller()
-        # Do not make episode reset depend on a newly rendered GPU LiDAR
-        # frame.  The scan is BEST_EFFORT and can legitimately arrive after
-        # the world has entered lockstep; step() ignores it until fresh.
+        # Ground truth and the mandatory terrain view must both describe the
+        # newly reset/spawned world, rather than the preceding episode.
         self.ros.wait_for_sensor_updates(
-            ground_truth_marker, self.sensor_timeout
+            post_mutation_markers, self.sensor_timeout
         )
         if not self.ros.ground_truth_valid():
             raise RuntimeError(
@@ -434,6 +519,10 @@ class NinoGazeboEnv(gym.Env):
         self.torque_square_sum = 0.0
         self.max_abs_torque = 0.0
         self.accel_square_sum = 0.0
+        self.speed_scale_sum = 0.0
+        self.min_speed_scale = 1.0
+        self.max_speed_scale = 0.0
+        self.ground_speed_sum = 0.0
         # Pause before selecting the episode clock origin. DDS may still hold
         # IMU messages generated during reset/navigation; using an earlier
         # sample here makes the first requested interval fall out of the IMU
@@ -491,12 +580,13 @@ class NinoGazeboEnv(gym.Env):
         self.ros.publish_straight_command(
             self._straight_command(self.previous_tracking.endpoint_distance)
         )
-        # Lidar is BEST_EFFORT at the same 10 Hz rate as the policy. Requiring
-        # a new DDS packet at an exact lockstep boundary makes one dropped scan
-        # fatal: the paused world cannot generate another one while we wait.
-        # Require all faster state/control streams here, then bound LiDAR age
-        # using its simulation timestamp below.
+        # The horizontal safety LiDAR remains age-bounded instead of being a
+        # hard barrier: one dropped 10 Hz packet must not abort an episode.
+        # The 20 Hz downward scan is policy input, however, so require a view
+        # produced after this action whenever terrain preview is enabled.
         sensor_names = ["odom", "ground_truth", "joint", "torque"]
+        if self.config["policy_v2"].get("require_terrain_preview", False):
+            sensor_names.append("terrain")
         sensor_markers = self.ros.sensor_markers(sensor_names)
         reward_reference = self._reference(
             self.previous_tracking, started_sim - self.episode_started_sim)
@@ -676,6 +766,8 @@ class NinoGazeboEnv(gym.Env):
             failed=failed, stalled=stalled, impact_scale=min(1.0, 0.25 + level),
             reference=reward_reference, previous_state=self.previous_robot_state,
             completion_fraction=completion_fraction,
+            elapsed=elapsed,
+            target_finish_seconds=float(self.config["target_finish_seconds"]),
         )
         self.episode_return += reward
         self.abs_lateral_sum += abs(tracking.lateral_error)
@@ -716,6 +808,10 @@ class NinoGazeboEnv(gym.Env):
         self.accel_square_sum += float(
             np.mean(np.asarray([truth.accel_x, truth.accel_y, truth.accel_z]) ** 2)
         )
+        self.speed_scale_sum += scale
+        self.min_speed_scale = min(self.min_speed_scale, scale)
+        self.max_speed_scale = max(self.max_speed_scale, scale)
+        self.ground_speed_sum += truth.ground_linear_velocity
         self.previous_tracking = tracking
         self.previous_robot_state = deepcopy(truth)
         self.action_before_previous = self.previous_action.copy()
@@ -726,6 +822,7 @@ class NinoGazeboEnv(gym.Env):
             "reward_terms": reward_terms,
             "applied_torque_nm": measured_torque.tolist(),
             "residual_torque_nm": torque.tolist(),
+            "speed_scale": scale,
             "lidar_lag_seconds": lidar_lag,
             "lidar_fresh": lidar_fresh,
             "completion_fraction": completion_fraction,
@@ -735,11 +832,14 @@ class NinoGazeboEnv(gym.Env):
             episode_feature_count = self.terrain_feature_count
             if succeeded:
                 self.successful_episodes += 1
-                if self.adaptive_terrain_progress:
-                    self.terrain_feature_count = min(
-                        self.max_terrain_features,
-                        self.terrain_feature_count + self.terrain_features_per_success,
-                    )
+            terrain_level_advanced = False
+            terrain_rolling_success = 0.0
+            terrain_window_episodes = 0
+            (
+                terrain_rolling_success,
+                terrain_window_episodes,
+                terrain_level_advanced,
+            ) = self._record_adaptive_terrain_outcome(succeeded)
             reason = (
         "success" if succeeded
         else "rollover" if rolled
@@ -772,6 +872,9 @@ class NinoGazeboEnv(gym.Env):
                 "goal_reached": succeeded,
                 "adaptive_terrain_features": episode_feature_count,
                 "next_adaptive_terrain_features": self.terrain_feature_count,
+                "adaptive_terrain_rolling_success": terrain_rolling_success,
+                "adaptive_terrain_window_episodes": terrain_window_episodes,
+                "adaptive_terrain_level_advanced": terrain_level_advanced,
                 "successful_episodes": self.successful_episodes,
                 "final_lateral_drift_m": float(tracking.lateral_error),
                 "final_abs_lateral_drift_m": abs(float(tracking.lateral_error)),
@@ -798,6 +901,10 @@ class NinoGazeboEnv(gym.Env):
                 "rms_imu_acceleration_m_s2": float(
                     np.sqrt(self.accel_square_sum / count)
                 ),
+                "mean_speed_scale": self.speed_scale_sum / count,
+                "min_speed_scale": self.min_speed_scale,
+                "max_speed_scale": self.max_speed_scale,
+                "mean_ground_speed_m_s": self.ground_speed_sum / count,
                 "waypoint_arrival_times_seconds": list(self.waypoint_arrival_times),
                 "waypoint_time_budgets_seconds": [
                     self.waypoint_slack + self.waypoint_seconds_per_m * float(value)

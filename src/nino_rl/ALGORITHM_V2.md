@@ -53,20 +53,19 @@ normalized wheel residuals. The two ground-truth-slip slots are omitted.
 Frames are stacked oldest to newest, clipped to [-5,5], reset by repeating the
 first frame. Training, evaluation and deployment use the same implementation.
 
-Optional `/nino_rl/terrain_preview` is a Float64MultiArray:
+The policy terrain preview is represented as:
 
 `[distance_ahead_m, left_track_height_m, right_track_height_m]`
 
-The producer must publish a fresh, sensor-derived preview along the planned
-path (or from a surveyed map available during deployment), not Gazebo cable
-spawn coordinates. Distance must be nonnegative and all values finite. Values
-are normalized by 5m / 0.1m / 0.1m; the fourth observation value is validity.
-Data expires after 0.5 wall seconds. Missing preview is zeros with validity=0.
-Set `require_terrain_preview: true` to stop when missing. No preview producer or
-new physical sensor is included in this change. The existing horizontal 2D
-LiDAR cannot guarantee detection of low bumps: default mode learns reactive
-control, not guaranteed anticipatory braking. Use the same preview setup for
-training and deployment. No contact-force or wheel-liftoff detector is included.
+The robot now includes a 20 Hz downward-looking 31-ray LiDAR fan and converts
+its `/terrain_scan` into this preview. An external deployable producer may also
+publish the same three-value payload on `/nino_rl/terrain_preview`; Gazebo spawn
+coordinates are never observations. Distance must be nonnegative and all values
+finite. Values are normalized by 1m / 0.1m / 0.1m; the fourth observation value
+is validity. Data expires after 0.5 wall seconds, and
+`require_terrain_preview: true` stops the run if no fresh post-step scan arrives.
+Use an equivalent downward range sensor or surveyed terrain producer on real
+hardware. No contact-force or wheel-liftoff detector is included.
 
 ## Active reward
 
@@ -76,8 +75,8 @@ Distances are metres; angles radians. Coefficients are initial tuning values.
 | Term | Definition |
 |---|---|
 | progress | +20 delta-progress, gated by straight-line position/heading alignment |
-| lateral | -4.0 h C(lateral_error / 0.10) |
-| heading | -2.0 h C(heading_error / 0.174533) |
+| lateral | -0.50 h C(lateral_error / 0.25) |
+| heading | -0.25 h C(heading_error / 0.35) |
 | impact | -0.05 impact_scale integral(min((a_world_z/2)^4,81) dt) / 0.1 |
 | body_rate | -0.05 h [C(gyro_x) + C(gyro_y)] |
 | attitude | -0.5 h [C(max(abs(roll)-0.20,0)/0.15) + C(max(abs(pitch)-0.30,0)/0.15)] |
@@ -86,7 +85,8 @@ Distances are metres; angles radians. Coefficients are initial tuning values.
 | effort | -0.01 h mean((commanded_residual / max_residual)²) |
 | time | -0.01 h |
 | stall | -0.5 h after <5cm net progress in 3s while Nav2 requests forward motion and goal is not reached |
-| terminal | +100 success; -100 collision/rollover/wrong direction; -75 off path; -50 timeout |
+| on-time success | up to +50, proportional to positive margin before the 15 s target |
+| terminal | +100 success; -100 collision/rollover/wrong direction; -75 off path; timeout from -50 near the goal to -100 at zero completion |
 
 `impact_scale = min(1, 0.25 + (phase-1)/5)` ramps impact penalty across phases.
 Failure takes precedence over success and timeout. Goal tolerance/stopped-arrival
