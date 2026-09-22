@@ -12,7 +12,7 @@ import gymnasium as gym
 import numpy as np
 import rclpy
 from gymnasium import spaces
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import SingleThreadedExecutor
 from rclpy.signals import SignalHandlerOptions
 
 from nino_rl.core import (
@@ -27,7 +27,8 @@ from nino_rl.core import (
 from nino_rl.ros_interface import RosRobotInterface
 from nino_rl.trajectory_metrics import EpisodeTrajectory
 from nino_rl.control_v2 import (
-    ACTION_SIZE, BASELINE_ACTION, ObservationHistory, StallWindow,
+    ACTION_SIZE, BASELINE_ACTION, ChallengeRegion, ChallengeTracker,
+    ObservationHistory, StallWindow,
     make_observation, compute_reward, decode_action,
 )
 
@@ -112,14 +113,39 @@ class NinoGazeboEnv(gym.Env):
             physics_step_seconds=self.physics_dt,
         )
         self.ros.imu_includes_gravity = bool(config["policy_v2"]["imu_includes_gravity"])
-        self.executor = MultiThreadedExecutor(num_threads=2)
+        # This executor already has its own dedicated Python thread. Using a
+        # MultiThreadedExecutor here makes spin_once submit ready 500 Hz clock
+        # callbacks to an internal pool faster than it can execute them,
+        # building a minutes-long stale queue. A single-threaded executor
+        # applies natural backpressure and preserves callback/service order.
+        self.executor = SingleThreadedExecutor()
         self.executor.add_node(self.ros)
         self.executor_stop = Event()
-        self.executor_thread = Thread(target=self._spin_executor, daemon=True)
-        self.executor_thread.start()
-        self.ros.wait_for_sensors(self.sensor_timeout)
-        if config["policy_v2"].get("require_terrain_preview", False):
-            self.ros.wait_for_terrain_preview(self.sensor_timeout)
+        self._transport_closed = False
+        self.executor_thread: Thread | None = None
+        self._start_executor_spin()
+        try:
+            self.ros.wait_for_sensors(self.sensor_timeout)
+            if config["policy_v2"].get("require_terrain_preview", False):
+                self.ros.wait_for_terrain_preview(self.sensor_timeout)
+            # PPO constructs its policy after the environment. Leaving Gazebo
+            # running here floods the Python executor with a 500 Hz clock plus
+            # sensor callbacks and can starve CUDA model initialization for
+            # minutes. reset() deliberately unpauses for episode setup, so the
+            # safe idle state between construction and the first reset is paused.
+            self.ros.set_world_paused(
+                True, timeout=self.simulation_step_timeout
+            )
+            self.world_is_paused = True
+            self._stop_executor_spin()
+        except BaseException:
+            # __init__ failures bypass train.py's env.close() finally block.
+            # Tear down the executor here so it cannot keep spinning against a
+            # destroyed/shutting-down rclpy context and emit a second traceback.
+            self._shutdown_ros_transport()
+            if self._owns_rclpy and rclpy.ok():
+                rclpy.shutdown()
+            raise
 
         self.global_steps = 0
         self.attempt_number = 0
@@ -154,10 +180,11 @@ class NinoGazeboEnv(gym.Env):
             adaptive.get("add_per_level", adaptive.get("add_per_success", 1))
         )
         self.terrain_success_window_size = int(
-            adaptive.get("rolling_window_episodes", 50)
+            adaptive.get("consecutive_successes", adaptive.get("rolling_window_episodes", 50))
         )
         self.terrain_advance_success_rate = float(
-            adaptive.get("advance_success_rate", 0.75)
+            1.0 if "consecutive_successes" in adaptive
+            else adaptive.get("advance_success_rate", 0.75)
         )
         self.terrain_feature_count = int(adaptive.get("initial_features", 0))
         if (
@@ -173,6 +200,7 @@ class NinoGazeboEnv(gym.Env):
         self.terrain_success_window = deque(
             maxlen=self.terrain_success_window_size
         )
+        self.challenge_tracker = ChallengeTracker()
         self.path = self._make_curriculum_path()
         self.previous_action = BASELINE_ACTION.copy()
         self.action_before_previous = BASELINE_ACTION.copy()
@@ -207,6 +235,31 @@ class NinoGazeboEnv(gym.Env):
         while not self.executor_stop.is_set() and rclpy.ok():
             self.executor.spin_once(timeout_sec=0.05)
 
+    def _start_executor_spin(self) -> None:
+        """Resume callback dispatch before any ROS-dependent environment work."""
+        if self._transport_closed:
+            raise RuntimeError("Cannot restart a closed ROS transport")
+        if self.executor_thread is not None and self.executor_thread.is_alive():
+            return
+        self.executor_stop.clear()
+        self.executor_thread = Thread(target=self._spin_executor, daemon=True)
+        self.executor_thread.start()
+
+    def _stop_executor_spin(self) -> None:
+        """Suspend callback dispatch while the paused environment is idle."""
+        self.executor_stop.set()
+        self.executor.wake()
+        if self.executor_thread is not None:
+            self.executor_thread.join(timeout=2.0)
+
+    def resume_callback_dispatch(self) -> None:
+        """Enable ROS callbacks before collecting environment transitions."""
+        self._start_executor_spin()
+
+    def suspend_callback_dispatch(self) -> None:
+        """Stop ROS callback work while paused PPO optimization runs."""
+        self._stop_executor_spin()
+
     def _curriculum_stage(self) -> tuple[int, float, float]:
         curriculum = self.config["curriculum"]
         if "fixed_phase" in curriculum:
@@ -214,6 +267,14 @@ class NinoGazeboEnv(gym.Env):
             return stage, stage / 5.0, float(self.goal_pose[0])
         if not curriculum.get("enabled", True):
             return 5, 1.0, float(self.goal_pose[0])
+        if "phase_steps" in curriculum:
+            interval = int(curriculum["phase_steps"])
+            order = list(curriculum.get("phase_order", [6, 5, 4, 3, 2, 1]))
+            if interval <= 0 or sorted(order) != [1, 2, 3, 4, 5, 6]:
+                raise ValueError("Curriculum needs positive phase_steps and six unique phases")
+            index = min(self.global_steps // interval, len(order) - 1)
+            stage = int(order[index]) - 1
+            return stage, stage / 5.0, float(self.goal_pose[0])
         fraction = min(1.0, self.global_steps / self.total_training_steps)
         stage = 0
         boundaries = list(curriculum["phase_fractions"])
@@ -287,24 +348,72 @@ class NinoGazeboEnv(gym.Env):
         if not x_min < x_max or not 0.0 <= max_center_offset < max_lateral < 1.80:
             raise ValueError("adaptive terrain bounds must fit inside the hallway")
         features = []
-        kinds = tuple(self.np_random.permutation(("pothole", "obstacle", "cable")))
+        # Every sampled feature is deliberately traversable. A tall blocking
+        # obstacle belongs to route planning, not this wheel-control task.
+        kinds = tuple(self.np_random.permutation(("pothole", "bump", "cable")))
         count = max(1, self.terrain_feature_count)
         for index in range(self.terrain_feature_count):
             kind = kinds[index % len(kinds)]
             size = (
                 float(config.get("pothole_radius_m", 0.30))
                 if kind == "pothole"
-                else float(config.get("obstacle_radius_m", 0.12))
-                if kind == "obstacle"
+                else float(config.get("bump_radius_m", 0.12))
+                if kind == "bump"
                 else float(config.get("cable_radius_m", 0.015))
             )
             # Stratification prevents a random pile-up while the jitter and
             # lateral offset produce a new, seed-reproducible layout each episode.
-            fraction = (index + self.np_random.uniform(0.15, 0.85)) / count
+            # Narrow jitter keeps adjacent centers >=90% of cell spacing.
+            # At the default cap this is 0.45 m; bowls recur only every third
+            # cell, avoiding stacked adaptive features while varying each run.
+            fraction = (index + self.np_random.uniform(0.45, 0.55)) / count
             x = x_min + fraction * (x_max - x_min)
             y = self.np_random.uniform(-max_center_offset, max_center_offset)
             features.append((kind, float(x), float(y), float(size)))
         return features
+
+    def _make_challenge_tracker(
+        self,
+        cables: list[tuple[float, float, float]],
+        features: list[tuple[str, float, float, float]],
+    ) -> ChallengeTracker:
+        """Build privileged reward regions; none are exposed to the actor."""
+        tracking = self.config.get("challenge_tracking", {})
+        contact_margin = float(tracking.get("robot_contact_margin_m", 0.20))
+        clearance_margin = float(tracking.get("robot_clearance_margin_m", 0.30))
+        adaptive_cable_half_length = 0.5 * float(
+            self.config["adaptive_terrain"].get("cable_length_m", 0.55)
+        )
+        regions = []
+        for index, (x, radius, angle) in enumerate(cables):
+            # The spawned cylinder direction is (sin(angle), cos(angle)).
+            regions.append(ChallengeRegion(
+                name=f"curriculum_cable_{index}",
+                kind="cable",
+                x=float(x),
+                y=0.0,
+                radius=float(radius),
+                half_length=2.0 / max(np.cos(float(angle)), 0.70),
+                angle=float(np.pi / 2.0 - angle),
+            ))
+        for index, (kind, x, y, size) in enumerate(features):
+            if kind not in ("pothole", "bump", "cable"):
+                # Non-traversable clutter is never a rewarded challenge.
+                continue
+            regions.append(ChallengeRegion(
+                name=f"adaptive_{index}_{kind}",
+                kind=kind,
+                x=float(x),
+                y=float(y),
+                radius=float(size),
+                half_length=(adaptive_cable_half_length if kind == "cable" else 0.0),
+                angle=(float(np.pi / 2.0) if kind == "cable" else 0.0),
+            ))
+        return ChallengeTracker(
+            regions,
+            contact_margin=contact_margin,
+            clearance_margin=clearance_margin,
+        )
 
     def adaptive_terrain_state(self) -> dict:
         """Return checkpoint-safe rolling curriculum state."""
@@ -446,6 +555,7 @@ class NinoGazeboEnv(gym.Env):
         return frame
 
     def reset(self, *, seed=None, options=None):
+        self._start_executor_spin()
         super().reset(seed=seed)
         # Episode setup requires a running clock.
         if self.world_is_paused:
@@ -466,18 +576,31 @@ class NinoGazeboEnv(gym.Env):
         self._last_noisy_state = None
         self._sample_randomization()
         stage, level, goal_x = self._curriculum_stage()
+        self.episode_curriculum_stage = stage
+        if getattr(self, "_announced_phase", None) != stage:
+            self.ros.get_logger().info(
+                f"Curriculum phase {stage + 1} at training step {self.global_steps}"
+            )
+            self._announced_phase = stage
         self.ros.reset_episode(start_pose=self.start_pose)
         episode_cables = self._curriculum_cables(stage)
         self.ros.configure_training_cables(episode_cables)
         episode_features = self._adaptive_terrain_features()
         self.ros.configure_adaptive_terrain(episode_features)
+        self.challenge_tracker = self._make_challenge_tracker(
+            episode_cables, episode_features
+        )
         self.ros.configure_goal_marker(
             self.goal_pose, radius=float(self.config["goal_tolerance_m"])
         )
         # Entity services can briefly hold Gazebo sensor publishers. Capture
         # callback markers only after the last world mutation, then require a
         # view of the completed episode layout and reset pose.
-        reset_sensor_names = ["ground_truth"]
+        # A scan captured near the terminal obstacle of the previous episode
+        # must never survive the teleport and become the first collision
+        # sample of the next one.  Wall-clock freshness cannot detect that
+        # case because DDS may deliver the old scan during reset.
+        reset_sensor_names = ["ground_truth", "scan"]
         if self.config["policy_v2"].get("require_terrain_preview", False):
             reset_sensor_names.append("terrain")
         post_mutation_markers = self.ros.sensor_markers(reset_sensor_names)
@@ -569,6 +692,7 @@ class NinoGazeboEnv(gym.Env):
             "cable_diameter_m": 2.0 * episode_cables[0][1],
             "cable_angle_deg": degrees(episode_cables[0][2]),
             "adaptive_terrain_features": len(episode_features),
+            "traversable_challenges": self.challenge_tracker.total,
         }
 
     def step(self, action):
@@ -585,9 +709,13 @@ class NinoGazeboEnv(gym.Env):
         # The 20 Hz downward scan is policy input, however, so require a view
         # produced after this action whenever terrain preview is enabled.
         sensor_names = ["odom", "ground_truth", "joint", "torque"]
-        if self.config["policy_v2"].get("require_terrain_preview", False):
-            sensor_names.append("terrain")
         sensor_markers = self.ros.sensor_markers(sensor_names)
+        require_terrain = self.config["policy_v2"].get(
+            "require_terrain_preview", False
+        )
+        terrain_markers = (
+            self.ros.sensor_markers(["terrain"]) if require_terrain else {}
+        )
         reward_reference = self._reference(
             self.previous_tracking, started_sim - self.episode_started_sim)
         delay = min(self.control_dt * 0.8, self._randomization["delay"])
@@ -623,6 +751,44 @@ class NinoGazeboEnv(gym.Env):
             torque[:] = 0.0
         self.ros.publish_control(scale, float(torque[0]), float(torque[1]))
         advance_chunked(self.physics_steps_per_control - delay_steps)
+
+        # GPU LiDAR rendering can miss the exact paused boundary even though
+        # /clock, odometry and controller feedback all advanced. Preserve the
+        # fresh-terrain contract by advancing at most one complete 20 Hz scan
+        # period, accounting that time as part of this action. This is a rare
+        # recovery path, not stale-observation fallback.
+        if require_terrain:
+            try:
+                # Allow the bridge/executor to deliver a scan already rendered
+                # by the nominal step before advancing simulation again. Under
+                # GPU load, 20 ms was too short and caused an unnecessary extra
+                # world-control transaction on many actions.
+                terrain_delivery_timeout = min(
+                    0.25,
+                    float(self.config["policy_v2"].get(
+                        "sensor_wait_timeout_seconds", 2.0
+                    )),
+                )
+                self.ros.wait_for_sensor_updates(
+                    terrain_markers, terrain_delivery_timeout
+                )
+            except RuntimeError:
+                recovery_markers = self.ros.sensor_markers(sensor_names)
+                terrain_period_steps = max(
+                    1, int(round(0.05 / self.physics_dt))
+                )
+                advance_chunked(terrain_period_steps)
+                self.ros.wait_for_sensor_updates(
+                    {**recovery_markers, **terrain_markers},
+                    self.config["policy_v2"].get(
+                        "sensor_wait_timeout_seconds", 2.0
+                    ),
+                )
+                self.ros.get_logger().warn(
+                    "Terrain scan missed the nominal action boundary; "
+                    "advanced one accounted 20 Hz sensor period"
+                )
+
         ended_sim = started_sim + advanced_sim
         self.lockstep_sim_time = ended_sim
         step_dt = ended_sim - started_sim
@@ -665,7 +831,18 @@ class NinoGazeboEnv(gym.Env):
         )
         lidar_lag = max(0.0, ended_sim - truth.lidar_stamp_s)
         lidar_fresh = self.ros.sensor_stream_ready("scan", self.nav_stale_seconds)
+        # A recently delivered packet can still describe the preceding pose
+        # or episode.  Only a scan from this action interval is safe to feed
+        # to the policy or use for collision termination.
+        lidar_current = (
+            lidar_fresh
+            and truth.lidar_stamp_s >= started_sim - 0.5 * self.physics_dt
+        )
         _, tracking = make_observation(truth, self.path, self.lookahead, action)
+        challenge_entry_count, challenge_clear_count = self.challenge_tracker.update(
+            (self.previous_robot_state.x, self.previous_robot_state.y),
+            (truth.x, truth.y),
+        )
         # Use the odometry message timestamp, not the end of an IMU wait.
         self.trajectory.add(truth.odom_stamp_s - self.trajectory.clock_origin_sim_s,
                             *self.ros.pose_in_frame(truth, self.trajectory.frame_id))
@@ -684,7 +861,7 @@ class NinoGazeboEnv(gym.Env):
             reached_waypoints += 1
         reference = self._reference(tracking, elapsed)
         actor_state = self._noisy_state(truth)
-        if not lidar_fresh:
+        if not lidar_current:
             # Empty sectors encode maximum/unknown clearance.  A delayed GPU
             # render must neither inject a scan from the previous pose into
             # the policy nor create a false collision termination.
@@ -715,10 +892,10 @@ class NinoGazeboEnv(gym.Env):
         # Bound extrapolation to avoid turning render latency into a false
         # collision. Delivery freshness independently decides whether this
         # scan can be used at all.
-        collision_scan_lag = min(lidar_lag, lidar_max_lag)
+        collision_scan_lag = min(lidar_lag, lidar_max_lag, step_dt)
         collision_clearance = min_lidar - self.straight_speed * collision_scan_lag
         collision = (
-            lidar_fresh
+            lidar_current
             and np.isfinite(collision_clearance)
             and collision_clearance <= float(self.config["lidar_collision_m"])
         )
@@ -749,7 +926,8 @@ class NinoGazeboEnv(gym.Env):
         # The configured mission deadline is a task failure, not an external
         # rollout cutoff. SB3 must not bootstrap a fictitious continuation.
         truncated = False
-        _, level, _ = self._curriculum_stage()
+        # Keep reward difficulty consistent with geometry until the next reset.
+        level = getattr(self, "episode_curriculum_stage", self._curriculum_stage()[0]) / 5.0
         delta_s = self.previous_tracking.distance_remaining - tracking.distance_remaining
         stalled = self.stall_window.update(elapsed, delta_s,
             reference.valid and reference.desired_linear_velocity > 0.05
@@ -768,6 +946,10 @@ class NinoGazeboEnv(gym.Env):
             completion_fraction=completion_fraction,
             elapsed=elapsed,
             target_finish_seconds=float(self.config["target_finish_seconds"]),
+            challenge_entry_count=challenge_entry_count,
+            challenge_clear_count=challenge_clear_count,
+            challenge_cleared_total=len(self.challenge_tracker.cleared),
+            challenge_total=self.challenge_tracker.total,
         )
         self.episode_return += reward
         self.abs_lateral_sum += abs(tracking.lateral_error)
@@ -825,7 +1007,14 @@ class NinoGazeboEnv(gym.Env):
             "speed_scale": scale,
             "lidar_lag_seconds": lidar_lag,
             "lidar_fresh": lidar_fresh,
+            "lidar_current": lidar_current,
             "completion_fraction": completion_fraction,
+            "difficult_path_chosen": bool(self.challenge_tracker.chosen),
+            "challenge_entry_count": challenge_entry_count,
+            "challenge_clear_count": challenge_clear_count,
+            "challenges_chosen": len(self.challenge_tracker.chosen),
+            "challenges_cleared": len(self.challenge_tracker.cleared),
+            "traversable_challenges": self.challenge_tracker.total,
             **metrics_dict(tracking, truth, elapsed, succeeded),
         }
         if terminated or truncated:
@@ -856,6 +1045,8 @@ class NinoGazeboEnv(gym.Env):
         f"lateral={tracking.lateral_error:.2f}m | "
         f"v={truth.linear_velocity:.2f}m/s | "
         f"reference_valid={reference.valid} | "
+        f"challenges={len(self.challenge_tracker.cleared)}/"
+        f"{self.challenge_tracker.total} | "
         f"lidar_min={min_lidar:.2f}m | "
         f"roll={degrees(truth.roll):.1f}deg | "
         f"pitch={degrees(truth.pitch):.1f}deg"
@@ -876,6 +1067,18 @@ class NinoGazeboEnv(gym.Env):
                 "adaptive_terrain_window_episodes": terrain_window_episodes,
                 "adaptive_terrain_level_advanced": terrain_level_advanced,
                 "successful_episodes": self.successful_episodes,
+                "difficult_path_chosen": bool(self.challenge_tracker.chosen),
+                "challenges_chosen": len(self.challenge_tracker.chosen),
+                "challenges_cleared": len(self.challenge_tracker.cleared),
+                "traversable_challenges": self.challenge_tracker.total,
+                "challenge_choice_fraction": (
+                    len(self.challenge_tracker.chosen)
+                    / max(1, self.challenge_tracker.total)
+                ),
+                "challenge_clear_fraction": (
+                    len(self.challenge_tracker.cleared)
+                    / max(1, self.challenge_tracker.total)
+                ),
                 "final_lateral_drift_m": float(tracking.lateral_error),
                 "final_abs_lateral_drift_m": abs(float(tracking.lateral_error)),
                 "return": self.episode_return,
@@ -938,8 +1141,20 @@ class NinoGazeboEnv(gym.Env):
             self.ros.publish_straight_command(0.0)
         return observation, reward, terminated, truncated, info
 
+    def _shutdown_ros_transport(self) -> None:
+        """Stop the executor and node, including after partial construction."""
+        if getattr(self, "_transport_closed", False):
+            return
+        self._transport_closed = True
+        self._stop_executor_spin()
+        self.executor.remove_node(self.ros)
+        self.executor.shutdown(timeout_sec=2.0)
+        self.ros.destroy_node()
+
     def close(self) -> None:
         try:
+            if not self._transport_closed:
+                self._start_executor_spin()
             self.ros.publish_control(0.0, 0.0, 0.0)
             self.ros.publish_straight_command(0.0)
             if self.world_is_paused or self.world_paused_for_update:
@@ -949,11 +1164,7 @@ class NinoGazeboEnv(gym.Env):
                 self.world_is_paused = False
                 self.world_paused_for_update = False
             sleep(0.05)
-            self.executor_stop.set()
-            self.executor_thread.join(timeout=2.0)
-            self.executor.remove_node(self.ros)
-            self.executor.shutdown(timeout_sec=2.0)
-            self.ros.destroy_node()
         finally:
+            self._shutdown_ros_transport()
             if self._owns_rclpy and rclpy.ok():
                 rclpy.shutdown()

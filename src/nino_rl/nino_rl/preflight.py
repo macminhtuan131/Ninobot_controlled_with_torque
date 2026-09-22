@@ -10,7 +10,7 @@ from time import monotonic, sleep
 
 from ament_index_python.packages import get_package_share_directory
 import rclpy
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import SingleThreadedExecutor
 
 from nino_rl.core import load_config
 from nino_rl.ros_interface import RosRobotInterface
@@ -41,7 +41,11 @@ def run_preflight(config: dict, timeout: float = 30.0) -> list[str]:
             config["policy_v2"].get("simulation_physics_step_seconds", 0.002)
         ),
     )
-    executor = MultiThreadedExecutor(num_threads=2)
+    # Keep the same ordered, backpressured callback model used by the Gym
+    # environment.  A MultiThreadedExecutor can queue the 500 Hz /clock stream
+    # faster than its worker pool drains it, making fresh joint feedback look
+    # frozen during the actuation check.
+    executor = SingleThreadedExecutor()
     executor.add_node(node)
     stop = Event()
 
@@ -68,7 +72,6 @@ def run_preflight(config: dict, timeout: float = 30.0) -> list[str]:
                 f"{len(clock_publishers)} ({publishers}). Stop other ROS/Gazebo "
                 "graphs and restart training_sim with the Nino isolated domain."
             )
-        node.configure_training_cables([], timeout=timeout)
         start = tuple(float(v) for v in nav["start_pose"])
         goal = tuple(float(v) for v in nav["goal_pose"])
         node.reset_episode(timeout=timeout, start_pose=start)
@@ -124,8 +127,25 @@ def run_preflight(config: dict, timeout: float = 30.0) -> list[str]:
         if abs(node.desired_twist()[1]) > 0.0:
             raise RuntimeError("straight command unexpectedly contains angular velocity")
         passed.append("10 angular velocity is fixed to zero; Nav2 is not required")
-        if not node.straight_reference_valid(float(nav["stale_seconds"])):
-            raise RuntimeError("straight reference or sensors became stale")
+        stale_after = float(nav["stale_seconds"])
+
+        def straight_reference_ready() -> bool:
+            # DDS subscriber discovery can outlast the freshness window. Keep
+            # the reference alive while waiting for fresh post-reset sensors.
+            node.publish_straight_command(0.0)
+            return node.straight_reference_valid(stale_after)
+
+        try:
+            _wait_until(
+                straight_reference_ready,
+                timeout,
+                "straight reference inputs did not become fresh",
+            )
+        except RuntimeError as error:
+            stale = node.stale_straight_reference_streams(stale_after)
+            raise RuntimeError(
+                f"straight reference missing/stale streams: {stale}"
+            ) from error
         passed.append("11 direct straight reference is observable by RL")
 
         node.reset_drive_state(timeout=timeout)

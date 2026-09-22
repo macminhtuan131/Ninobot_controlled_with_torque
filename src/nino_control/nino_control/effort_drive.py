@@ -312,7 +312,15 @@ class EffortDrive(Node):
 
         self.last_cmd_ns = 0
         self.last_torque_ns = 0
-        self.last_control_ns = self.get_clock().now().nanoseconds
+        now = self.get_clock().now()
+        self.last_control_ns = now.nanoseconds
+
+        # Publish the reset state as part of the reset transaction.  Waiting
+        # for the periodic control timer made episode startup depend on a
+        # later simulation tick, which is especially fragile while switching
+        # from the preflight's running world to lockstep training.
+        self._publish_odometry(now, 0.0, 0.0)
+        self.last_odom_publish_ns = now.nanoseconds
 
         response.success = True
         response.message = (

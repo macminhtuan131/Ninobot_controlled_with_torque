@@ -20,7 +20,7 @@ def arguments() -> argparse.Namespace:
     default_config = Path(get_package_share_directory("nino_rl")) / "config" / "ppo.yaml"
     parser = argparse.ArgumentParser(description="Train PPO for Nino wheel torques")
     parser.add_argument("--config", type=Path, default=default_config)
-    parser.add_argument("--timesteps", type=int, default=500_000)
+    parser.add_argument("--timesteps", type=int, default=600_000)
     parser.add_argument("--output", type=Path, default=Path("rl_runs"))
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--checkpoint-every", type=int, default=25_000)
@@ -70,18 +70,21 @@ def main() -> None:
             th.cuda.synchronize()
         except (RuntimeError, AssertionError) as error:
             raise SystemExit(f"CUDA was detected but a CUDA operation failed: {error}") from error
-        print(f"CUDA ready: {th.cuda.get_device_name(th.cuda.current_device())}")
+        print(
+            f"CUDA ready: {th.cuda.get_device_name(th.cuda.current_device())}",
+            flush=True,
+        )
 
     from nino_rl.ros_env import NinoGazeboEnv
     from nino_rl.preflight import run_preflight
 
-    print("Running mandatory 12-point straight-line RL preflight...")
+    print("Running mandatory 12-point straight-line RL preflight...", flush=True)
     try:
         preflight_results = run_preflight(config, args.preflight_timeout)
     except (RuntimeError, TimeoutError) as error:
         raise SystemExit(f"PREFLIGHT FAILED; training was not started: {error}") from error
     for result in preflight_results:
-        print(f"PASS: {result}")
+        print(f"PASS: {result}", flush=True)
 
     class TrainingMetricsCallback(BaseCallback):
         """Expose reward components and endpoint metrics in TensorBoard."""
@@ -91,6 +94,7 @@ def main() -> None:
             self.reward_terms: dict[str, list[float]] = {}
 
         def _on_rollout_start(self) -> None:
+            env.resume_callback_dispatch()
             self.reward_terms.clear()
 
         def _on_step(self) -> bool:
@@ -126,6 +130,12 @@ def main() -> None:
                         "adaptive_terrain_rolling_success",
                         "adaptive_terrain_window_episodes",
                         "adaptive_terrain_level_advanced",
+                        "difficult_path_chosen",
+                        "challenges_chosen",
+                        "challenges_cleared",
+                        "traversable_challenges",
+                        "challenge_choice_fraction",
+                        "challenge_clear_fraction",
                         "mean_speed_scale",
                         "min_speed_scale",
                         "max_speed_scale",
@@ -139,6 +149,7 @@ def main() -> None:
             env.ros.publish_control(0.0, 0.0, 0.0)
             # The lockstep environment is already paused between every action,
             # so optimizer wall time cannot consume episode simulation time.
+            env.suspend_callback_dispatch()
             for name, values in self.reward_terms.items():
                 if values:
                     self.logger.record(f"reward_terms/{name}", float(np.mean(values)))
@@ -178,6 +189,7 @@ def main() -> None:
             initial_adaptive_state = env.adaptive_terrain_state()
             check_env(env, warn=True)
             env.restore_adaptive_terrain_state(initial_adaptive_state)
+            env.global_steps = 0  # API validation does not consume the curriculum.
         monitored = Monitor(env, filename=str(run_dir / "monitor.csv"))
         ppo = config["ppo"]
         if args.resume:
@@ -226,7 +238,15 @@ def main() -> None:
             save_vecnormalize=True,
         )
         sync_adaptive_terrain_state(model, env)
-        print(f"Bắt đầu train trên {model.device}; kết quả: {run_dir}")
+        print(
+            f"Training is active on {model.device}; results: {run_dir}",
+            flush=True,
+        )
+        print(
+            f"Collecting {model.n_steps} environment steps before each PPO "
+            "update; episode-end lines are live rollout progress.",
+            flush=True,
+        )
         model.learn(
             total_timesteps=args.timesteps,
             callback=[checkpoint_callback, TrainingMetricsCallback()],

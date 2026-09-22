@@ -18,6 +18,8 @@ section are retained for historical regression tests only; training calls
 - PPO still uses separate 256/256 ELU actor and critic networks.
 - Action `[speed, forward, yaw]` is normalized to [-1,1]. Speed maps to [0,1].
   Residuals are `0.5 * clip(forward-yaw)` and `0.5 * clip(forward+yaw)` Nm.
+  This common/differential basis spans independent bounded left/right wheel
+  torques; it does not force both motors to receive the same effort.
 - `/nino_rl/control_command` carries `[speed_scale, left_Nm, right_Nm]` in one
   Float64MultiArray. `effort_drive` scales the *actual* post-safety Nav2
   `/cmd_vel` before computing the PI wheel-speed targets, then adds residuals.
@@ -85,6 +87,9 @@ Distances are metres; angles radians. Coefficients are initial tuning values.
 | effort | -0.01 h mean((commanded_residual / max_residual)²) |
 | time | -0.01 h |
 | stall | -0.5 h after <5cm net progress in 3s while Nav2 requests forward motion and goal is not reached |
+| challenge entry | up to +10 total per episode, split across unique traversable hazards |
+| challenge clear | up to +30 total per episode, split across unique traversable hazards |
+| successful difficult path | up to +60 at goal, proportional to the cleared-hazard fraction |
 | on-time success | up to +50, proportional to positive margin before the 15 s target |
 | terminal | +100 success; -100 collision/rollover/wrong direction; -75 off path; timeout from -50 near the goal to -100 at zero completion |
 
@@ -93,6 +98,15 @@ Failure takes precedence over success and timeout. Goal tolerance/stopped-arriva
 criteria remain in `core.goal_reached`. Collision currently uses the existing
 LiDAR proximity test; it is not a physical contact classifier. The wheel-ground
 contact of traversable bumps is not itself counted as a collision.
+
+Challenge entry and clearance are one-shot episode flags computed from the
+known training geometry and odometry only for reward/metrics; spawn coordinates
+are not actor observations. The maximum entry/clear return is invariant to the
+number of hazards. A failed or timed-out step cannot earn a new challenge
+bonus, while the largest challenge bonus requires successful goal arrival.
+The adaptive generator contains only a shallow stepped bump, basin surrogate,
+and transverse cable. The retained 35 cm post geometry is a blocking obstacle
+for route-planning tests and is excluded from this wheel-control curriculum.
 
 All IMU samples in a policy window contribute using zero-order hold. Coverage
 must exceed 80%; no sample is held for more than 0.1s. Duplicate timestamps are

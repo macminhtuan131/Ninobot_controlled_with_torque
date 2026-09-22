@@ -17,7 +17,8 @@ from nino_rl.trajectory_metrics import write_csv
 METRICS = ("path_rmse_m", "cross_track_rmse_m", "path_p95_m", "path_max_m",
            "heading_rmse_deg", "endpoint_error_m", "final_progress_fraction",
            "backtracking_m", "time_seconds", "rms_vertical_acceleration_m_s2",
-           "peak_vertical_acceleration_m_s2", "rms_wheel_slip", "rms_wheel_torque_nm")
+           "peak_vertical_acceleration_m_s2", "rms_wheel_slip", "rms_wheel_torque_nm",
+           "challenge_choice_fraction", "challenge_clear_fraction")
 
 
 def benchmark_id(config):
@@ -126,6 +127,7 @@ def run(baseline=False):
                 f"{episode+1}: reached={row['goal_reached']}; "
                 f"time={row['time_seconds']:.2f}s, "
                 f"endpoint={row['endpoint_distance_m']:.3f}m, "
+                f"challenges={row['challenges_cleared']}/{row['traversable_challenges']}, "
                 f"lateral drift={row['final_abs_lateral_drift_m']:.3f}m, "
                 f"path RMSE={row['path_rmse_m']:.3f}m"
             )

@@ -13,8 +13,8 @@ import yaml
 from nino_rl.trajectory_metrics import EpisodeTrajectory
 from nino_rl.core import RobotState, PathTracker, TrackingState, NavReference, goal_reached, is_wrong_direction, metrics_dict, wheel_slip_ratios
 from nino_rl.control_v2 import (
-    BASELINE_ACTION, STOP_ACTION, FRAME_SIZE, ImuWindow, ObservationHistory,
-    StallWindow, compute_reward, decode_action, make_observation,
+    BASELINE_ACTION, STOP_ACTION, ChallengeRegion, ChallengeTracker, FRAME_SIZE,
+    ImuWindow, ObservationHistory, StallWindow, compute_reward, decode_action, make_observation,
     validate_model, vertical_acceleration,
 )
 
@@ -111,6 +111,22 @@ class TestV2(unittest.TestCase):
         for i in range(40):
             self.assertFalse(window.update(4 + i / 10, .01, True))
 
+    def test_challenge_flags_are_one_shot_and_require_actual_clearance(self):
+        region = ChallengeRegion(
+            "short_cable", "cable", 1.0, 0.0, 0.02,
+            half_length=0.3, angle=np.pi / 2.0,
+        )
+        tracker = ChallengeTracker([region], contact_margin=0.10, clearance_margin=0.20)
+        self.assertEqual(tracker.update((0.7, 0.0), (0.91, 0.0)), (1, 0))
+        self.assertEqual(tracker.update((0.91, 0.0), (1.10, 0.0)), (0, 0))
+        self.assertEqual(tracker.update((1.10, 0.0), (1.23, 0.0)), (0, 1))
+        self.assertEqual(tracker.update((1.23, 0.0), (0.8, 0.0)), (0, 0))
+        self.assertEqual(tracker.update((0.8, 0.0), (1.3, 0.0)), (0, 0))
+
+        avoided = ChallengeTracker([region], contact_margin=0.10, clearance_margin=0.20)
+        self.assertEqual(avoided.update((0.7, 0.5), (1.3, 0.5)), (0, 0))
+        self.assertFalse(avoided.chosen)
+
     def reward(self, delta=0, **kwargs):
         previous = TrackingState(0, 0, 0, 30, 30)
         current = TrackingState(delta, 0, 0, 30-delta, 30-delta)
@@ -156,6 +172,40 @@ class TestV2(unittest.TestCase):
             CONFIG["reward_v2"]["on_time_success_bonus"] / 3.0,
         )
         self.assertEqual(late["on_time_success"], 0.0)
+
+    def test_challenge_reward_is_normalized_and_goal_gated(self):
+        _, terms = self.reward(
+            challenge_entry_count=1,
+            challenge_clear_count=1,
+            challenge_cleared_total=1,
+            challenge_total=2,
+        )
+        self.assertEqual(
+            terms["challenge_entry"],
+            CONFIG["reward_v2"]["challenge_entry_bonus"] / 2,
+        )
+        self.assertEqual(
+            terms["challenge_clear"],
+            CONFIG["reward_v2"]["challenge_clear_bonus"] / 2,
+        )
+        self.assertEqual(terms["challenge_goal"], 0.0)
+        _, success = self.reward(
+            succeeded=True,
+            challenge_cleared_total=1,
+            challenge_total=2,
+        )
+        self.assertEqual(
+            success["challenge_goal"],
+            CONFIG["reward_v2"]["challenge_goal_bonus"] / 2,
+        )
+        _, failed = self.reward(
+            failed="collision",
+            challenge_entry_count=1,
+            challenge_clear_count=1,
+            challenge_total=2,
+        )
+        self.assertEqual(failed["challenge_entry"], 0.0)
+        self.assertEqual(failed["challenge_clear"], 0.0)
 
 
 class TestActuator(unittest.TestCase):
@@ -234,7 +284,8 @@ class TestActuator(unittest.TestCase):
 class TestEnvironmentContract(unittest.TestCase):
     def run_step(self, collision=False, timed_out=False, torque_fresh=True,
                  baseline=False, torque_noise=0., navigation_invalid=False,
-                 goal_reached_position=False, goal_crossed=False, lidar_stale=False):
+                 goal_reached_position=False, goal_crossed=False, lidar_stale=False,
+                 lidar_sim_lag=False):
         source = ROOT / "src/nino_rl/nino_rl/ros_env.py"
         cls = next(x for x in ast.parse(source.read_text()).body if isinstance(x, ast.ClassDef))
         step = next(x for x in cls.body if isinstance(x, ast.FunctionDef) and x.name == "step")
@@ -249,7 +300,7 @@ class TestEnvironmentContract(unittest.TestCase):
             metrics_dict=metrics_dict, wheel_slip_ratios=wheel_slip_ratios)
         exec(compile(ast.Module(body=[step], type_ignores=[]), str(source), "exec"), namespace)
         state = RobotState(odom_stamp_s=.1,
-                           lidar_stamp_s=.8 if lidar_stale else 1.0,
+                           lidar_stamp_s=.8 if (lidar_stale or lidar_sim_lag) else 1.0,
                            x=29.95 if goal_reached_position else 30.201 if goal_crossed else .02,
                            yaw=.05 if goal_reached_position else .30 if goal_crossed else 0.0,
                            linear_velocity=.2 if (goal_reached_position or goal_crossed) else 0.0,
@@ -305,6 +356,7 @@ class TestEnvironmentContract(unittest.TestCase):
             history=history, _curriculum_stage=lambda: (0, 0., 30), stall_window=StallWindow(),
             off_path_steps=0, off_path_seconds=0., nav_invalid_steps=0, nav_invalid_seconds=0.,
             wrong_direction_steps=0, wrong_direction_seconds=0., attempt_number=1)
+        env.challenge_tracker = ChallengeTracker()
         env.terrain_feature_count = 0
         env.terrain_features_per_success = 1
         env.max_terrain_features = 20
@@ -383,6 +435,14 @@ class TestEnvironmentContract(unittest.TestCase):
         )
         self.assertFalse(terminated)
         self.assertFalse(info["lidar_fresh"])
+
+    def test_previous_epoch_lidar_cannot_cause_a_false_collision(self):
+        (_, _, terminated, _, info), _ = self.run_step(
+            collision=True, lidar_sim_lag=True
+        )
+        self.assertFalse(terminated)
+        self.assertTrue(info["lidar_fresh"])
+        self.assertFalse(info["lidar_current"])
 
     def test_stale_navigation_terminates_episode_instead_of_training_run(self):
         (_, reward, terminated, truncated, info), commands = self.run_step(

@@ -5,6 +5,7 @@ All time integrals use simulation timestamps. Old 54-input/2-action models are
 intentionally incompatible with this contract.
 """
 from collections import deque
+from dataclasses import dataclass
 from math import cos, sin, exp
 
 import numpy as np
@@ -15,6 +16,120 @@ FRAME_SIZE = 60
 ACTION_SIZE = 3
 BASELINE_ACTION = np.array([1.0, 0.0, 0.0], dtype=np.float32)
 STOP_ACTION = np.array([-1.0, 0.0, 0.0], dtype=np.float32)
+
+
+@dataclass(frozen=True)
+class ChallengeRegion:
+    """A traversable circular hazard or finite cable segment in odom."""
+
+    name: str
+    kind: str
+    x: float
+    y: float
+    radius: float
+    half_length: float = 0.0
+    angle: float = 0.0
+
+    def __post_init__(self):
+        values = (self.x, self.y, self.radius, self.half_length, self.angle)
+        if (
+            not self.name
+            or self.kind not in ("pothole", "bump", "cable")
+            or not np.all(np.isfinite(values))
+            or self.radius <= 0.0
+            or self.half_length < 0.0
+        ):
+            raise ValueError("Invalid traversable challenge region")
+
+    def _closest_point(self, x: float, y: float) -> tuple[float, float]:
+        if self.half_length == 0.0:
+            return self.x, self.y
+        direction_x, direction_y = cos(self.angle), sin(self.angle)
+        along = np.clip(
+            (x - self.x) * direction_x + (y - self.y) * direction_y,
+            -self.half_length,
+            self.half_length,
+        )
+        return (
+            self.x + float(along) * direction_x,
+            self.y + float(along) * direction_y,
+        )
+
+    def touches(self, x: float, y: float, margin: float) -> bool:
+        closest_x, closest_y = self._closest_point(x, y)
+        return bool(
+            np.hypot(x - closest_x, y - closest_y)
+            <= self.radius + margin
+        )
+
+    def clearance_x(self, y: float, margin: float) -> float:
+        """Return the forward edge local to the robot's current lateral line."""
+        crossing_x = self.x
+        if self.half_length > 0.0:
+            direction_x, direction_y = cos(self.angle), sin(self.angle)
+            if abs(direction_y) > 1e-6:
+                along = np.clip(
+                    (y - self.y) / direction_y,
+                    -self.half_length,
+                    self.half_length,
+                )
+                crossing_x += float(along) * direction_x
+            else:
+                crossing_x += self.half_length
+        return crossing_x + self.radius + margin
+
+
+class ChallengeTracker:
+    """One-shot difficult-path flags that cannot be farmed by oscillating."""
+
+    def __init__(self, regions=(), contact_margin=0.20, clearance_margin=0.30):
+        self.regions = tuple(regions)
+        if (
+            len({region.name for region in self.regions}) != len(self.regions)
+            or not np.isfinite(contact_margin)
+            or not np.isfinite(clearance_margin)
+            or contact_margin < 0.0
+            or clearance_margin < contact_margin
+        ):
+            raise ValueError("Invalid challenge tracker geometry")
+        self.contact_margin = float(contact_margin)
+        self.clearance_margin = float(clearance_margin)
+        self.chosen: set[str] = set()
+        self.cleared: set[str] = set()
+
+    @property
+    def total(self) -> int:
+        return len(self.regions)
+
+    def update(self, previous_xy, current_xy) -> tuple[int, int]:
+        previous = np.asarray(previous_xy, dtype=float)
+        current = np.asarray(current_xy, dtype=float)
+        if (
+            previous.shape != (2,)
+            or current.shape != (2,)
+            or not np.all(np.isfinite(previous))
+            or not np.all(np.isfinite(current))
+        ):
+            raise ValueError("Challenge tracking needs two finite XY poses")
+        midpoint = 0.5 * (previous + current)
+        newly_chosen = newly_cleared = 0
+        for region in self.regions:
+            if region.name not in self.chosen and any(
+                region.touches(float(point[0]), float(point[1]), self.contact_margin)
+                for point in (previous, midpoint, current)
+            ):
+                self.chosen.add(region.name)
+                newly_chosen += 1
+            if (
+                region.name in self.chosen
+                and region.name not in self.cleared
+                and current[0] > previous[0]
+                and current[0]
+                >= region.clearance_x(float(current[1]), self.clearance_margin)
+            ):
+                self.cleared.add(region.name)
+                newly_cleared += 1
+        return newly_chosen, newly_cleared
 
 
 def decode_action(action, max_torque=0.5):
@@ -172,7 +287,9 @@ def compute_reward(previous, current, state, action, previous_action, torque,
                    timed_out=False, stalled=False, impact_scale=1.0,
                    reference=None, previous_state=None,
                    completion_fraction=0.0, elapsed=None,
-                   target_finish_seconds=None):
+                   target_finish_seconds=None, challenge_entry_count=0,
+                   challenge_clear_count=0, challenge_cleared_total=0,
+                   challenge_total=0):
     """AMR reward with v2 I/O; see REWARD_POLICY_UPDATE.md for the objective.
 
     Tracking uses an unscaled pre-action baseline reference and simulation truth
@@ -184,6 +301,19 @@ def compute_reward(previous, current, state, action, previous_action, torque,
         raise ValueError("Reward requires positive simulation time")
     if not 0.0 <= cfg.get("saturation_fraction", 0.9) < 1.0:
         raise ValueError("saturation_fraction must be in [0, 1)")
+    challenge_counts = (
+        challenge_entry_count,
+        challenge_clear_count,
+        challenge_cleared_total,
+        challenge_total,
+    )
+    if (
+        any(int(value) != value or value < 0 for value in challenge_counts)
+        or challenge_entry_count > challenge_total
+        or challenge_clear_count > challenge_total
+        or challenge_cleared_total > challenge_total
+    ):
+        raise ValueError("Invalid traversable challenge counts")
     h = dt / 0.1
     cap = lambda x: min(float(x) ** 2, 9.0)
     delta = previous.distance_remaining - current.distance_remaining
@@ -223,6 +353,8 @@ def compute_reward(previous, current, state, action, previous_action, torque,
                                  previous_state.applied_right_torque])
         torque_rate = -cfg.get("torque_rate_weight", 0.0) * float(np.mean(
             ((applied - old_torque) / torque_scale) ** 2)) / h
+    challenge_denominator = max(1, int(challenge_total))
+    challenge_step_allowed = not failed and not timed_out
     terms = {
         # No asymmetric clipping across a closed forward/backward path: raw
         # signed differences telescope for a fixed path (undiscounted).
@@ -255,6 +387,22 @@ def compute_reward(previous, current, state, action, previous_action, torque,
             + cap(state.ground_yaw_rate / cfg.get("goal_yaw_sigma_rad_s", 0.30))),
         "time": -h * cfg["time_penalty"],
         "stall": -h * cfg["stall_penalty"] if stalled else 0.0,
+        # Each region pays at most once through ChallengeTracker. Normalizing
+        # by the episode count keeps the maximum shaping return fixed as the
+        # adaptive curriculum adds hazards.
+        "challenge_entry": (
+            cfg.get("challenge_entry_bonus", 0.0)
+            * int(challenge_entry_count)
+            / challenge_denominator
+            if challenge_step_allowed else 0.0
+        ),
+        "challenge_clear": (
+            cfg.get("challenge_clear_bonus", 0.0)
+            * int(challenge_clear_count)
+            / challenge_denominator
+            if challenge_step_allowed else 0.0
+        ),
+        "challenge_goal": 0.0,
         "success_position": 0.0,
         "success_heading": 0.0,
         "on_time_success": 0.0,
@@ -265,6 +413,11 @@ def compute_reward(previous, current, state, action, previous_action, torque,
         terms["terminal"] = -cfg["off_path_penalty"] if failed == "off_path" else -cfg["failure_penalty"]
     elif succeeded:
         terms["terminal"] = cfg["success_bonus"]
+        terms["challenge_goal"] = (
+            cfg.get("challenge_goal_bonus", 0.0)
+            * int(challenge_cleared_total)
+            / challenge_denominator
+        )
         terms["success_position"] = -cfg.get(
             "success_position_penalty", 0.0
         ) * kernel_cost(

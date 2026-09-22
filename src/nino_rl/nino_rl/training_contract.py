@@ -3,15 +3,17 @@ from copy import deepcopy
 
 
 def training_contract(config):
-    return {"revision": 24, **{key: deepcopy(value) for key, value in config.items()
+    return {"revision": 26,
+            "phase_schedule": {key: deepcopy(config.get("curriculum", {}).get(key))
+                               for key in ("enabled", "phase_steps", "phase_order")},
+            **{key: deepcopy(value) for key, value in config.items()
             if key not in ("device", "seed", "curriculum", "terrain_curriculum", "reward")}}
 
 
 def validate_resume(model, config):
     expected = training_contract(config)
     saved = deepcopy(getattr(model, "nino_training_contract", None))
-    # Revision 24 intentionally does not migrate older checkpoints: downward
-    # terrain preview and on-time speed learning change the policy task.
+    # Revision 26 records the absolute phase schedule and five-success gate.
     if saved != expected:
         raise ValueError(
             "Checkpoint reward/policy/PPO contract differs or predates this patch. "

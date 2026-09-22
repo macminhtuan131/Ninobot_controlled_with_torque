@@ -94,6 +94,13 @@ reward_v2:
   goal_yaw_sigma_rad_s: 0.30
   time_penalty: 0.01
   stall_penalty: 0.5
+  # Difficult-path shaping is normalized by the number of traversable hazards,
+  # so these are maximum per-episode totals rather than per-object rewards.
+  # Entry and clearing each pay once; the largest bonus is delayed until a
+  # successful goal arrival. Failed/timeout steps cannot earn a new bonus.
+  challenge_entry_bonus: 10.0
+  challenge_clear_bonus: 30.0
+  challenge_goal_bonus: 60.0
   success_bonus: 100.0
   # Successful runs earn up to this extra amount in proportion to the positive
   # margin before target_finish_seconds. Impact costs still discourage blindly
@@ -139,11 +146,10 @@ navigation:
 
 curriculum:
   enabled: true
-  # Requested order is hard -> easy. Advance manually after held-out evaluation.
-  fixed_phase: 1
-  # All six phases contain exactly one cable. Difficulty changes only with
-  # cable diameter and absolute angle; see terrain_curriculum below.
-  phase_fractions: [0.0, 0.15, 0.30, 0.50, 0.70, 0.85]
+  # Absolute training steps, preserved on resume. Apply the next phase at reset.
+  phase_steps: 100000
+  phase_order: [6, 5, 4, 3, 2, 1]
+  # An explicit CLI --phase still overrides the automatic schedule.
 
 terrain_curriculum:
   cable_x_m: 4.0
@@ -157,15 +163,20 @@ terrain_curriculum:
     - {name: easy, diameter_m: 0.007, angle_deg: 9.0}
     - {name: easiest, diameter_m: 0.005, angle_deg: 0.0}
 
-# Rolling-success hazard curriculum. Training starts with one randomized hazard
-# and adds one only after 50 consecutive episodes at the current level achieve
-# at least 75% success. Evaluation freezes only the count.
+# Privileged reward geometry only: these values never enter the observation.
+# Contact marks the one-time difficult-path flag; clearance requires the robot
+# center to pass fully beyond the local forward edge of the feature.
+challenge_tracking:
+  robot_contact_margin_m: 0.20
+  robot_clearance_margin_m: 0.30
+
+# Add one hazard after five consecutive successes. A failure breaks the streak;
+# promotion clears it. Evaluation freezes only the count.
 adaptive_terrain:
   enabled: true
   initial_features: 1
   add_per_level: 1
-  rolling_window_episodes: 50
-  advance_success_rate: 0.75
+  consecutive_successes: 5
   # Eight broad hazards fill this 4 m zone without the excessive overlap that
   # twenty 0.60 m-diameter bowls would create.
   max_features: 8
@@ -174,8 +185,9 @@ adaptive_terrain:
   max_center_offset_m: 0.10
   max_lateral_center_m: 1.55
   pothole_radius_m: 0.30
-  obstacle_radius_m: 0.12
+  bump_radius_m: 0.12
   cable_radius_m: 0.015
+  cable_length_m: 0.55
 
 domain_randomization:
   # Disabled by default so phase difficulty is based only on cable size/angle.

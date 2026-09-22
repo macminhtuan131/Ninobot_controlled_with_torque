@@ -27,9 +27,10 @@ discovery, preventing another machine or simulator from injecting a conflicting
 - [Bài viết nghiên cứu tổng quan bằng tiếng Việt](docs/BAO_CAO_NGHIEN_CUU_RL_NINO.md)
 - [Simulation and hardware reference](docs/HARDWARE_REFERENCE.md)
 
-The current training contract is revision 24. Because its reward balance,
-downward terrain preview and rolling hazard curriculum changed, older checkpoints cannot be
-resumed; start a new run. New checkpoints retain rolling curriculum state, so
+The current training contract is revision 26. Because its reward balance,
+traversable-challenge flags, terrain geometry, downward preview, and rolling
+hazard curriculum changed, older checkpoints cannot be resumed; start a new
+run. New checkpoints retain rolling curriculum state, so
 resume no longer resets hazard difficulty. Old models may still be used for
 inference with their matching config. Old 54-input/2-action models are
 incompatible. No pretrained weights or measured performance gains are included.
@@ -193,13 +194,17 @@ at `x=4 m`, leaving 2 m for recovery and drift measurement before the 6 m goal.
 With `headless:=false`, Gazebo displays the goal as a bright green disc, pole,
 and flag. The marker is visual-only and cannot collide with the robot or LiDAR.
 
-Training starts with one hazard. One more is added only when the latest 50
-episodes at that level reach at least 75% success. Rolling results and the
+Training starts with one adaptive hazard. One more is added after five
+consecutive successful episodes. Any failure breaks the streak, and adding a
+hazard clears the streak. The cap is eight adaptive hazards plus the single
+phase cable. Rolling results and the
 current hazard count are stored in every regular, final, and interrupted
-checkpoint. Pothole-like patches, obstacles, and short cables are randomized
-per episode inside the training zone, with centers within 10 cm of the nominal
-path so driving straight cannot simply bypass them. The curriculum tops out at
-eight hazards to avoid overlapping the broad bowls inside the four-metre zone.
+checkpoint. Pothole-like patches, low stepped bumps, and short transverse
+cables are randomized per episode inside the training zone, with centers within
+10 cm of the nominal path. The 35 cm post geometry is classified as a blocking
+route-planning obstacle and is never sampled or rewarded as a wheel-control
+challenge. The curriculum tops out at eight traversable hazards to avoid
+overlapping the broad bowls inside the four-metre zone.
 
 Speed is a learned continuous action: PPO scales the 0.75 m/s straight
 reference from 0 to 100% on every 0.1 s policy step. A 20 Hz downward-looking
@@ -208,6 +213,23 @@ addition to the forward safety LiDAR. Successful arrival before the 15 s target
 earns a proportional bonus, while impact, slip, torque, timeout, and path terms
 prevent "always full speed" from being the only useful strategy. TensorBoard
 records mean/min/max speed scale and mean ground speed for every episode.
+
+The other two actions are common and differential residual effort. They map
+bijectively onto bounded left/right wheel torque, so PPO can increase one wheel,
+decrease the other, or change both independently while the 500 Hz PI loop keeps
+the requested wheel velocity stable. Acceleration is not a competing actuator
+mode: it is the physical result of bounded torque, velocity targets, and the
+controller's wheel-acceleration/slew limits.
+
+Traversable challenges use one-shot privileged reward flags that are not added
+to the actor observation. Entering a challenge can earn at most +10 over the
+whole episode, clearing its local forward edge at most +30, and a successful
+goal earns up to another +60 in proportion to the fraction cleared. These
+totals are divided across the episode's challenge count, so adding hazards does
+not inflate the maximum return. Oscillation cannot collect a flag twice, and a
+collision, rollover, timeout, off-path, or wrong-direction step earns no new
+challenge bonus. Episode reports and TensorBoard include chosen/cleared counts
+and fractions under `challenge_*` fields.
 
 The randomized pothole is a 0.60 m round, 30 mm-deep relative basin with smooth
 approximately 12.5-degree entry/exit ramps and a roughly 3 mm leading edge. It
@@ -263,7 +285,10 @@ The run prints its directory, e.g. `rl_runs/20260917-123456-123456/`. It contain
 `ppo.yaml`, software/device metadata, `monitor.csv`, TensorBoard logs,
 `checkpoints/nino_ppo_*_steps.zip` and `nino_ppo_final.zip` when finished.
 Rollouts are 2048 steps, so SB3 can exceed the requested step count to complete
-a rollout. A 500000-step run needs at least 50000 simulated seconds at 10 Hz,
+a rollout. Training is already active while those steps are collected; the
+first PPO optimizer table does not appear until the first rollout completes.
+Watch the live `EPISODE END` lines for collection progress. A 500000-step run
+needs at least 50000 simulated seconds at 10 Hz,
 plus reset/update overhead; actual wall time depends on Gazebo throughput.
 
 Terminal C:
@@ -334,11 +359,25 @@ make asynchronous ROS/Gazebo execution bitwise deterministic.
 perturbations. These are not physical friction/mass changes.
 The baseline receives zero residual torque, including under randomized testing.
 
-## 9. Run the cable phases after evaluation
+## 9. Run all six cable phases automatically
 
-Every phase has exactly one cable at 4 m. The requested order is hard to easy;
+Every phase has exactly one cable at 4 m. Training progresses from easy to hard;
 only cable diameter and absolute angle define phase difficulty. The sign of a
 nonzero angle is randomized so the policy does not favor one wheel.
+
+Run one continuous training job with the default configuration:
+
+```bash
+ros2 run nino_rl train --device cuda --timesteps 600000 --check-env
+```
+
+Omit `--phase`: specifying it deliberately locks the run to one phase.
+Steps 0–99,999 use phase 6, then phases 5, 4, 3, and 2 each receive
+100,000 steps; phase 1 starts at step 500,000. Terrain changes on the first
+episode reset after a boundary, so an active crossing is never interrupted.
+The phase remains 1 after the schedule finishes. Resume preserves absolute
+step progress and the hazard success streak. API checks do not advance the
+schedule. PPO may finish its final rollout beyond the requested step budget.
 
 | Phase | Difficulty | Diameter | Absolute angle |
 |---|---|---:|---:|
@@ -359,13 +398,13 @@ regression versus baseline. These are proposed acceptance criteria, not measured
 results. Use additional seeds for a final test, distinct from development seeds.
 
 ```bash
-ros2 run nino_rl train --device cuda --phase 2 --timesteps 500000 \
-  --config rl_runs/PHASE1_RUN/ppo.yaml \
-  --resume rl_runs/PHASE1_RUN/nino_ppo_final.zip
+ros2 run nino_rl train --device cuda --timesteps 300000 \
+  --config rl_runs/YOUR_RUN/ppo.yaml \
+  --resume rl_runs/YOUR_RUN/checkpoints/nino_ppo_300000_steps.zip
 ```
 
-Evaluate phase 2 using the same phase/seeds for baseline and PPO. Repeat for
-phases 3–6, resuming the preceding phase. Keep several checkpoints; the final
+Evaluate each phase using the same phase/seeds for baseline and PPO. The phase
+schedule is step-based and does not wait for evaluation success. Keep several checkpoints; the final
 one is not automatically best. Evaluate them on the same development seeds,
 then test the chosen model on new seeds. Do not run an evaluation callback
 against the same live world while the trainer is collecting a rollout.

@@ -14,10 +14,59 @@ from nino_rl.core import RobotState
 ROOT = Path(__file__).parents[3]
 
 
-def test_lockstep_accepts_lost_service_response_only_after_clock_proof():
-    class Future:
+def test_sensor_wait_accepts_complete_snapshot_at_deadline():
+    ros = SimpleNamespace(
+        _lock=Lock(),
+        _received={"odom", "imu", "joint", "scan"},
+    )
+
+    # A zero timeout exercises the final atomic snapshot directly. Previously
+    # this raised a timeout whose missing-stream list was empty.
+    RosRobotInterface.wait_for_sensors(ros, timeout=0.0)
+
+
+def test_drive_reset_preserves_odometry_published_before_service_response():
+    class Client:
         @staticmethod
-        def done():
+        def wait_for_service(timeout_sec):
+            return True
+
+    ros = SimpleNamespace(
+        _lock=Lock(),
+        _received={"odom"},
+        _received_at={"odom": 1.0},
+        reset_odometry=Client(),
+    )
+
+    def reset_service(_client, _request_factory, _timeout, _operation):
+        # Model the reset node's publication racing ahead of its response.
+        ros._received.add("odom")
+        ros._received_at["odom"] = 2.0
+        return SimpleNamespace(success=True, message="reset")
+
+    ros._call_idempotent_service = reset_service
+    RosRobotInterface.reset_drive_state(ros, timeout=0.1)
+
+    assert ros._received_at["odom"] == 2.0
+
+
+def test_zero_odometry_accepts_post_request_sample_after_slow_service_response():
+    ros = SimpleNamespace(
+        _lock=Lock(),
+        _received_at={"odom": 1.0},
+        _state=RobotState(x=0.0, y=0.0, yaw=0.0),
+    )
+    RosRobotInterface.wait_for_zero_odometry(ros, timeout=0.1)
+
+
+def test_lockstep_accepts_lost_service_response_immediately_after_clock_proof():
+    class Future:
+        checks = 0
+
+        def done(self):
+            self.checks += 1
+            if self.checks == 2:
+                ros._sim_clock_stamp = 1.05
             return False
 
     removed = []
@@ -34,21 +83,20 @@ def test_lockstep_accepts_lost_service_response_only_after_clock_proof():
         get_logger=lambda: SimpleNamespace(warn=warnings.append),
     )
 
-    def lose_response_after_executing(_future, _timeout):
-        ros._sim_clock_stamp = 1.05
-        raise TimeoutError("lost response")
-
-    ros._wait_future = lose_response_after_executing
-    result = RosRobotInterface.advance_world(ros, 25, timeout=0.1)
+    result = RosRobotInterface.advance_world(ros, 25, timeout=1.0)
     assert result == 0.05
     assert len(removed) == 1
-    assert "clock confirms" in warnings[0]
+    assert not warnings
 
 
 def test_lockstep_accepts_quiescent_near_complete_clock_interval():
     class Future:
-        @staticmethod
-        def done():
+        checks = 0
+
+        def done(self):
+            self.checks += 1
+            if self.checks == 2:
+                ros._sim_clock_stamp = 1.046
             return False
 
     removed = []
@@ -65,13 +113,8 @@ def test_lockstep_accepts_quiescent_near_complete_clock_interval():
         get_logger=lambda: SimpleNamespace(warn=warnings.append),
     )
 
-    def lose_response_after_partial_clock_delivery(_future, _timeout):
-        ros._sim_clock_stamp = 1.046
-        raise TimeoutError("lost response")
-
-    ros._wait_future = lose_response_after_partial_clock_delivery
     ros.wait_for_clock_quiescence = lambda timeout, quiet_time: ros._sim_clock_stamp
-    result = RosRobotInterface.advance_world(ros, 25, timeout=0.1)
+    result = RosRobotInterface.advance_world(ros, 25, timeout=0.01)
     assert result == 0.05
     assert len(removed) == 1
     assert "near-complete atomic chunk" in warnings[0]
@@ -244,20 +287,43 @@ def test_nino_python_tools_force_the_same_local_isolated_ros_domain():
 
 def test_episode_reset_and_step_require_fresh_terrain_preview():
     source = (ROOT / "src" / "nino_rl" / "nino_rl" / "ros_env.py").read_text()
+    constructor = source[source.index("    def __init__("):source.index("    def _spin_executor(")]
     reset = source[source.index("    def reset("):source.index("    def step(")]
     step = source[source.index("    def step("):]
-    assert 'reset_sensor_names = ["ground_truth"]' in reset
+    assert "self.ros.set_world_paused(" in constructor
+    assert "self.world_is_paused = True" in constructor
+    assert "self._stop_executor_spin()" in constructor
+    assert "self._start_executor_spin()" in reset
+    assert "SingleThreadedExecutor()" in constructor
+    assert 'reset_sensor_names = ["ground_truth", "scan"]' in reset
     assert 'reset_sensor_names.append("terrain")' in reset
     assert "post_mutation_markers" in reset
     assert "wait_for_sensor_updates" in reset
     assert 'sensor_markers(["scan"])' not in reset
-    assert 'sensor_names.append("terrain")' in step
+    assert 'self.ros.sensor_markers(["terrain"])' in step
+    assert "terrain_period_steps" in step
+    assert "terrain_delivery_timeout = min(" in step
+    assert "terrain_markers, terrain_delivery_timeout" in step
+
+
+def test_preflight_keeps_straight_command_fresh_after_subscriber_discovery():
+    source = (ROOT / "src" / "nino_rl" / "nino_rl" / "preflight.py").read_text()
+    assert "def straight_reference_ready()" in source
+    assert "node.publish_straight_command(0.0)" in source
+    assert "node.stale_straight_reference_streams(stale_after)" in source
+
+
+def test_ppo_suspends_ros_callbacks_during_optimizer_updates():
+    source = (ROOT / "src" / "nino_rl" / "nino_rl" / "train.py").read_text()
+    assert "env.resume_callback_dispatch()" in source
+    assert "env.suspend_callback_dispatch()" in source
 
 
 def test_six_phase_curriculum_and_straight_goal_are_configured():
     config_path = ROOT / "src" / "nino_rl" / "config" / "ppo.yaml"
     config = yaml.safe_load(config_path.read_text())
-    assert len(config["curriculum"]["phase_fractions"]) == 6
+    assert config["curriculum"]["phase_order"] == [6, 5, 4, 3, 2, 1]
+    assert config["curriculum"]["phase_steps"] == 100000
     phases = config["terrain_curriculum"]["phases_hard_to_easy"]
     assert len(phases) == 6
     assert all(phase["diameter_m"] > 0 for phase in phases)
@@ -325,6 +391,79 @@ def test_goal_marker_is_visible_but_has_no_collision_geometry():
     assert "DeleteEntity.Request" not in configure_source
 
 
+def test_episode_entities_use_known_names_after_initial_world_adoption():
+    class Client:
+        srv_name = "/test"
+
+        @staticmethod
+        def wait_for_service(timeout_sec):
+            return True
+
+    operations = []
+    interface = SimpleNamespace(
+        delete_entity=Client(),
+        spawn_entity=Client(),
+        _training_cable_names=None,
+        _adaptive_terrain_present=None,
+        _cable_spawn_request=lambda name, x, radius, angle: object(),
+        _adaptive_terrain_sdf=lambda name, features: "<sdf/>",
+    )
+
+    def call(_client, request_factory, _timeout, operation):
+        request_factory()
+        operations.append(operation)
+        return SimpleNamespace(success=True)
+
+    interface._call_idempotent_service = call
+    RosRobotInterface.configure_training_cables(
+        interface, [(4.0, 0.01, 0.0)]
+    )
+    initial_cable_operations = len(operations)
+    assert initial_cable_operations == 2  # remove legacy model, then spawn
+
+    RosRobotInterface.configure_training_cables(
+        interface, [(4.0, 0.01, 0.0)]
+    )
+    assert len(operations) - initial_cable_operations == 2  # remove/spawn cable 0
+
+    RosRobotInterface.configure_adaptive_terrain(
+        interface, [("obstacle", 2.0, 0.5, 0.1)]
+    )
+    initial_terrain_operations = len(operations)
+    RosRobotInterface.configure_adaptive_terrain(interface, [])
+    assert len(operations) - initial_terrain_operations == 1  # remove known model
+    RosRobotInterface.configure_adaptive_terrain(interface, [])
+    assert len(operations) - initial_terrain_operations == 1  # already absent
+
+
+def test_goal_marker_creates_before_using_the_move_fast_path():
+    class Client:
+        srv_name = "/test"
+
+        @staticmethod
+        def wait_for_service(timeout_sec):
+            return True
+
+    operations = []
+    interface = SimpleNamespace(
+        set_entity_pose=Client(),
+        spawn_entity=Client(),
+        _goal_marker_present=None,
+        _goal_marker_sdf=lambda name, radius: "<sdf/>",
+    )
+
+    def call(_client, request_factory, _timeout, operation):
+        request_factory()
+        operations.append(operation)
+        return SimpleNamespace(success=True)
+
+    interface._call_idempotent_service = call
+    RosRobotInterface.configure_goal_marker(interface, (6.0, 0.0, 0.0))
+    assert operations == ["create goal marker"]
+    RosRobotInterface.configure_goal_marker(interface, (5.0, 0.0, 0.0))
+    assert operations[-1] == "move goal marker"
+
+
 def test_robot_has_bridged_downward_terrain_laser():
     urdf = (ROOT / "src" / "nino_description" / "urdf" / "nino.urdf.xacro").read_text()
     bridge = yaml.safe_load(
@@ -336,7 +475,7 @@ def test_robot_has_bridged_downward_terrain_laser():
     assert any(item.get("ros_topic_name") == "/terrain_scan" for item in bridge)
 
 
-def test_adaptive_terrain_sdf_contains_all_three_feature_types():
+def test_adaptive_terrain_sdf_separates_traversable_and_blocking_features():
     source_path = ROOT / "src" / "nino_rl" / "nino_rl" / "ros_interface.py"
     module = ast.parse(source_path.read_text())
     interface = next(node for node in module.body if isinstance(node, ast.ClassDef))
@@ -348,13 +487,19 @@ def test_adaptive_terrain_sdf_contains_all_three_feature_types():
     exec(compile(ast.Module(body=[method], type_ignores=[]), str(source_path), "exec"), namespace)
     sdf = namespace["_adaptive_terrain_sdf"]("adaptive", [
         ("pothole", 3.0, 1.0, 0.18),
-        ("obstacle", 4.0, -1.0, 0.12),
+        ("bump", 4.0, -1.0, 0.12),
         ("cable", 5.0, 1.2, 0.015),
     ])
     root = ET.fromstring(sdf)
     assert len(root.findall(".//link")) == 3
     assert len(root.findall(".//collision")) >= 6
-    assert "pothole" in sdf and "obstacle" in sdf and "cable" in sdf
+    assert "pothole" in sdf and "bump" in sdf and "cable" in sdf
+    bump_collisions = [
+        collision for collision in root.findall(".//collision")
+        if "bump" in collision.attrib.get("name", "")
+    ]
+    assert len(bump_collisions) == 5
+    assert max(float(item.find("pose").text.split()[2]) for item in bump_collisions) <= 0.0125
     pothole_collisions = [
         collision for collision in root.findall(".//collision")
         if "pothole" in collision.attrib.get("name", "")

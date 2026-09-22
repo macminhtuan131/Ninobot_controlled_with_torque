@@ -169,10 +169,11 @@ abort the run rather than becoming learned collision penalties.
 - Randomized evaluation uses full strength. Baseline always has zero residual
   torque. Both evaluators consume the same random draws and use the same
   metrics pipeline, with no competing simultaneous process.
-- Training contract revision 24 includes task, observation and randomization
-  settings, while permitting phase changes, seed/device changes and terrain
-  curriculum adjustments. Incompatible resumes fail instead of silently
-  changing the learning objective. Run metadata records software and GPU.
+- Training contract revision 26 includes the automatic phase schedule, task, observation, traversable
+  challenge reward, geometry, and randomization settings, while permitting
+  phase changes, seed/device changes and terrain curriculum adjustments.
+  Incompatible resumes fail instead of silently changing the learning
+  objective. Run metadata records software and GPU.
 
 ## Metric definitions and limits
 

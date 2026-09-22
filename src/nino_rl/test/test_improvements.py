@@ -11,7 +11,9 @@ import pytest
 import yaml
 
 from nino_rl.core import RobotState, TrackingState, quaternion_to_euler
-from nino_rl.control_v2 import compute_reward, BASELINE_ACTION
+from nino_rl.control_v2 import (
+    BASELINE_ACTION, ChallengeRegion, ChallengeTracker, compute_reward,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = yaml.safe_load((ROOT / 'config/ppo.yaml').read_text())
@@ -82,12 +84,39 @@ def test_adaptive_terrain_randomizes_mixed_features_across_path():
     env.np_random = np.random.default_rng(43)
     regenerated = features(env)
     assert len(generated) == 20
-    assert {feature[0] for feature in generated} == {"pothole", "obstacle", "cable"}
+    assert {feature[0] for feature in generated} == {"pothole", "bump", "cable"}
     for kind, x, y, size in generated:
         assert 1.2 <= x <= 5.2
         assert abs(y) <= 0.10
         assert abs(y) + size < 1.80
     assert generated != regenerated
+
+
+def test_challenge_tracker_includes_only_traversable_episode_geometry():
+    build = method(
+        'ros_env.py',
+        '_make_challenge_tracker',
+        dict(np=np, ChallengeRegion=ChallengeRegion, ChallengeTracker=ChallengeTracker),
+    )
+    env = SimpleNamespace(config={
+        "challenge_tracking": {
+            "robot_contact_margin_m": 0.20,
+            "robot_clearance_margin_m": 0.30,
+        },
+        "adaptive_terrain": {"cable_length_m": 0.55},
+    })
+    tracker = build(
+        env,
+        [(4.0, 0.01, np.deg2rad(30.0))],
+        [
+            ("pothole", 2.0, 0.0, 0.30),
+            ("bump", 3.0, 0.0, 0.12),
+            ("cable", 5.0, 0.0, 0.015),
+            ("obstacle", 3.5, 0.0, 0.12),
+        ],
+    )
+    assert tracker.total == 4
+    assert {region.kind for region in tracker.regions} == {"pothole", "bump", "cable"}
 
 
 def test_adaptive_terrain_advances_only_after_rolling_success_gate():
@@ -128,6 +157,59 @@ def test_adaptive_terrain_checkpoint_state_round_trip():
     )
     restore(target, saved)
     assert state(target) == saved
+
+
+def test_automatic_phase_schedule_boundaries_and_resume():
+    stage = method('ros_env.py', '_curriculum_stage', dict(np=np))
+    env = SimpleNamespace(config=deepcopy(CONFIG), goal_pose=(6, 0, 0),
+                          global_steps=0, total_training_steps=600000)
+    for steps, phase in [(0, 6), (99999, 6), (100000, 5), (200000, 4),
+                         (300000, 3), (400000, 2), (499999, 2),
+                         (500000, 1), (600000, 1), (900000, 1)]:
+        env.global_steps = steps
+        assert stage(env)[0] + 1 == phase
+    env.global_steps = 250000
+    env.total_training_steps = 350000  # Resume budget must not shift boundaries.
+    assert stage(env)[0] + 1 == 4
+    env.config['curriculum']['fixed_phase'] = 1
+    assert stage(env)[0] + 1 == 1
+
+
+def test_five_success_streak_failure_reset_cap_and_checkpoint():
+    record = method('ros_env.py', '_record_adaptive_terrain_outcome', dict(np=np))
+    save = method('ros_env.py', 'adaptive_terrain_state', {})
+    restore = method('ros_env.py', 'restore_adaptive_terrain_state', {})
+    env = SimpleNamespace(adaptive_terrain_progress=True,
+        terrain_success_window=deque(maxlen=5), terrain_success_window_size=5,
+        terrain_advance_success_rate=1.0, terrain_episodes_at_level=0,
+        terrain_feature_count=7, terrain_features_per_success=1,
+        max_terrain_features=8, successful_episodes=0)
+    for outcome in [True]*4 + [False] + [True]*4:
+        assert not record(env, outcome)[2]
+    saved = save(env)
+    env.terrain_success_window.clear()
+    restore(env, saved)
+    assert record(env, True)[2]
+    assert env.terrain_feature_count == 8
+    assert not env.terrain_success_window
+    for _ in range(10):
+        assert not record(env, True)[2]
+    assert env.terrain_feature_count == 8
+
+
+def test_default_field_capacity_randomization_and_spacing():
+    generate = method('ros_env.py', '_adaptive_terrain_features', dict(np=np))
+    env = SimpleNamespace(config=deepcopy(CONFIG), adaptive_terrain_enabled=True,
+                          terrain_feature_count=8)
+    layouts = []
+    for seed in range(30):
+        env.np_random = np.random.default_rng(seed)
+        features = generate(env)
+        assert len(features) == 8
+        assert {f[0] for f in features} == {'bump', 'pothole', 'cable'}
+        assert min(np.diff([f[1] for f in features])) >= .45
+        layouts.append(tuple(features))
+    assert len(set(layouts)) == 30
 
 
 def test_downward_scan_produces_advance_terrain_preview():
