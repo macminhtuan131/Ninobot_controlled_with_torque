@@ -652,6 +652,37 @@ class RosRobotInterface(Node):
                 if self._received_at.get(name, -float("inf")) <= marker
             ]
 
+    def refresh_reset_sensors(self, names, timeout=5.0, step_timeout=10.0):
+        """Produce a fresh reset view under explicit, bounded physics stepping.
+
+        Entity mutations and model reset are asynchronous. An earlier unpause
+        acknowledgement cannot guarantee publishers are still running after
+        those mutations. Keep motors stopped and deliberately drive the sensor
+        clocks before starting the episode. Never accept cached observations.
+        """
+        self.publish_straight_command(0.0)
+        self.publish_control(0.0, 0.0, 0.0)
+        self.set_world_paused(True, timeout=step_timeout)
+        markers = self.sensor_markers(names)
+        clock_before = self.latest_clock_stamp()
+        steps = max(1, int(round(0.10 / self.physics_step_seconds)))
+        for attempt in range(3):
+            # Separate setup intervals, not retries of a timed-out physics
+            # request: advance_world failures propagate immediately.
+            self.advance_world(steps, timeout=step_timeout)
+            try:
+                self.wait_for_sensor_updates(markers, timeout=timeout)
+                return
+            except RuntimeError as error:
+                missing = self.missing_sensor_updates(markers)
+                detail = (
+                    f"Reset sensor refresh {attempt + 1}/3: missing {missing}; "
+                    f"clock {clock_before} -> {self.latest_clock_stamp()}"
+                )
+                if attempt == 2:
+                    raise RuntimeError(detail) from error
+                self.get_logger().warn(detail)
+
     def wait_for_v2_controller(self, timeout=5.0):
         deadline = monotonic() + timeout
         while self.control_publisher.get_subscription_count() == 0:

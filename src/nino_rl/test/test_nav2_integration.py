@@ -297,8 +297,7 @@ def test_episode_reset_and_step_require_fresh_terrain_preview():
     assert "SingleThreadedExecutor()" in constructor
     assert 'reset_sensor_names = ["ground_truth", "scan"]' in reset
     assert 'reset_sensor_names.append("terrain")' in reset
-    assert "post_mutation_markers" in reset
-    assert "wait_for_sensor_updates" in reset
+    assert "refresh_reset_sensors" in reset
     assert 'sensor_markers(["scan"])' not in reset
     assert 'self.ros.sensor_markers(["terrain"])' in step
     assert "terrain_period_steps" in step
@@ -311,6 +310,44 @@ def test_preflight_keeps_straight_command_fresh_after_subscriber_discovery():
     assert "def straight_reference_ready()" in source
     assert "node.publish_straight_command(0.0)" in source
     assert "node.stale_straight_reference_streams(stale_after)" in source
+
+
+def test_reset_sensor_refresh_steps_with_stopped_motors_and_bounded_recovery():
+    import pytest
+    events = []
+    waits = []
+    def wait(markers, timeout):
+        waits.append(markers)
+        if len(waits) < 2:
+            raise RuntimeError("render delayed")
+    ros = SimpleNamespace(
+        physics_step_seconds=.002,
+        publish_straight_command=lambda speed: events.append(('speed', speed)),
+        publish_control=lambda *cmd: events.append(('control', cmd)),
+        set_world_paused=lambda value, timeout: events.append(('pause', value)),
+        sensor_markers=lambda names: dict.fromkeys(names, 1.0),
+        latest_clock_stamp=lambda: 2.0,
+        advance_world=lambda steps, timeout: events.append(('step', steps)),
+        wait_for_sensor_updates=wait,
+        missing_sensor_updates=lambda markers: list(markers),
+        get_logger=lambda: SimpleNamespace(warn=lambda msg: None),
+    )
+    RosRobotInterface.refresh_reset_sensors(ros, ['scan', 'terrain'])
+    assert events[:3] == [('speed', 0.0), ('control', (0.0, 0.0, 0.0)), ('pause', True)]
+    assert events[3:] == [('step', 50), ('step', 50)]
+    assert waits[0] == waits[1] == {'scan': 1.0, 'terrain': 1.0}
+    def never_ready(*args, **kwargs):
+        raise RuntimeError('missing')
+    ros.wait_for_sensor_updates = never_ready
+    events.clear()
+    with pytest.raises(RuntimeError, match='Reset sensor refresh 3/3.*clock'):
+        RosRobotInterface.refresh_reset_sensors(ros, ['scan'])
+    assert events.count(('step', 50)) == 3
+    events.clear()
+    ros.advance_world = never_ready
+    with pytest.raises(RuntimeError, match='missing'):
+        RosRobotInterface.refresh_reset_sensors(ros, ['scan'])
+    assert len(events) == 3  # Failed physics commands are never blindly retried.
 
 
 def test_ppo_suspends_ros_callbacks_during_optimizer_updates():

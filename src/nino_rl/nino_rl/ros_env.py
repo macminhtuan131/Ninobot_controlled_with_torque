@@ -603,15 +603,16 @@ class NinoGazeboEnv(gym.Env):
         reset_sensor_names = ["ground_truth", "scan"]
         if self.config["policy_v2"].get("require_terrain_preview", False):
             reset_sensor_names.append("terrain")
-        post_mutation_markers = self.ros.sensor_markers(reset_sensor_names)
         self.ros.wait_for_sensors(self.sensor_timeout)
         self.ros.publish_straight_command(0.0)
         self.ros.wait_for_v2_controller()
         # Ground truth and the mandatory terrain view must both describe the
         # newly reset/spawned world, rather than the preceding episode.
-        self.ros.wait_for_sensor_updates(
-            post_mutation_markers, self.sensor_timeout
+        self.ros.refresh_reset_sensors(
+            reset_sensor_names, timeout=self.sensor_timeout,
+            step_timeout=self.simulation_step_timeout,
         )
+        self.world_is_paused = True
         if not self.ros.ground_truth_valid():
             raise RuntimeError(
                 "Training slip reward received invalid /ground_truth/odom"
