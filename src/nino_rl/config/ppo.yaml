@@ -5,6 +5,7 @@ max_episode_seconds: 20.0
 target_finish_seconds: 15.0
 max_wheel_torque_nm: 2.0
 goal_tolerance_m: 0.10
+goal_overshoot_limit_m: 0.30
 # Success is restricted to this small endpoint circle. Crossing the infinite
 # goal plane is deliberately disabled because it accepted large lateral misses.
 goal_capture_on_crossing: false
@@ -35,14 +36,14 @@ policy_v2:
   require_terrain_preview: true
   preview_timeout_seconds: 0.5
   simulation_step_wall_timeout_seconds: 10.0
-  # If a world-control reply is lost and BEST_EFFORT /clock exposes most but
-  # not all of a chunk, score the verified elapsed simulation time instead of
-  # aborting. Smaller advances still indicate a real simulator failure.
-  lockstep_min_completion_fraction: 0.80
+  # A service acknowledgment only queues physics work. Full clock completion
+  # is mandatory before the next command or observation is consumed.
+  lockstep_min_completion_fraction: 1.0
   # Matches long_hall.sdf. 50 steps per 10 Hz action keeps cable contacts
   # stable while halving the physics cost of the original 1 ms setting.
   simulation_physics_step_seconds: 0.002
   sensor_wait_timeout_seconds: 2.0
+  motion_max_lag_seconds: 0.04
   # Cap conservative collision-distance extrapolation for the asynchronous
   # BEST_EFFORT GPU LiDAR. Transport freshness is checked separately.
   lidar_max_lag_seconds: 0.25
@@ -58,7 +59,10 @@ policy_v2:
   imu_max_latest_lag_seconds: 0.10
 
 reward_v2:
-  progress_weight: 20.0
+  # At most +60 on the fixed 6 m route. Together with +10 traversal shaping,
+  # this remains below every failure penalty (minimum 75).
+  progress_weight: 10.0
+  progress_metric: endpoint
   # Straight-path tracking dominates small comfort/effort savings. Forward
   # progress is additionally gated by alignment in compute_reward().
   progress_lateral_sigma_m: 0.25
@@ -92,15 +96,15 @@ reward_v2:
   goal_braking_distance_m: 0.80
   goal_speed_sigma_m_s: 1.20
   goal_yaw_sigma_rad_s: 0.30
-  time_penalty: 0.01
+  time_penalty: 0.05
   stall_penalty: 0.5
   # Difficult-path shaping is normalized by the number of traversable hazards,
   # so these are maximum per-episode totals rather than per-object rewards.
   # Entry and clearing each pay once; the largest bonus is delayed until a
   # successful goal arrival. Failed/timeout steps cannot earn a new bonus.
-  challenge_entry_bonus: 10.0
-  challenge_clear_bonus: 30.0
-  challenge_goal_bonus: 60.0
+  challenge_entry_bonus: 2.0
+  challenge_clear_bonus: 8.0
+  challenge_goal_bonus: 90.0
   success_bonus: 100.0
   # Successful runs earn up to this extra amount in proportion to the positive
   # margin before target_finish_seconds. Impact costs still discourage blindly
@@ -115,11 +119,10 @@ reward_v2:
   failure_penalty: 100.0
   off_path_penalty: 75.0
   timeout_penalty: 100.0
-  # Even a near-goal timeout pays half the full penalty; incomplete progress
-  # controls only the other half. This prevents waiting near the goal from
-  # becoming competitive with entering the strict endpoint circle.
-  timeout_minimum_fraction: 0.50
-  timeout_completion_scaling: true
+  # Progress is already rewarded densely; do not also forgive a deadline
+  # failure as progress increases. Arrival must remain the primary objective.
+  timeout_minimum_fraction: 1.0
+  timeout_completion_scaling: false
 
 path:
   lookahead_m: [0.5, 1.0, 2.0, 3.5, 5.0, 7.5, 10.0, 12.5, 15.0]
@@ -138,7 +141,9 @@ navigation:
   # controller's configured wheel-speed limit for maximum cable-crossing speed.
   straight_speed_m_s: 0.75
   minimum_approach_speed_m_s: 0.03
-  goal_slowdown_distance_m: 1.00
+  # A full metre of proportional slowdown made the initial 0.70 speed policy
+  # creep toward the capture circle until almost the 20 s deadline.
+  goal_slowdown_distance_m: 0.50
   stale_seconds: 2.0
   waypoint_spacing_m: 2.0
   waypoint_budget_seconds_per_m: 2.5
@@ -161,10 +166,11 @@ terrain_curriculum:
     - {name: hard, diameter_m: 0.011, angle_deg: 27.0}
     - {name: medium, diameter_m: 0.009, angle_deg: 18.0}
     - {name: easy, diameter_m: 0.007, angle_deg: 9.0}
-    - {name: easiest, diameter_m: 0.005, angle_deg: 0.0}
+    - {name: easiest, diameter_m: 0.005, angle_deg: 5.0}
 
 # Privileged reward geometry only: these values never enter the observation.
-# Contact marks the one-time difficult-path flag; clearance requires the robot
+# Powered-wheel swept footprints mark the one-time difficult-path flag;
+# passing a bump between the wheels does not count. Clearance requires the robot
 # center to pass fully beyond the local forward edge of the feature.
 challenge_tracking:
   robot_contact_margin_m: 0.20
@@ -177,20 +183,26 @@ adaptive_terrain:
   initial_features: 1
   add_per_level: 1
   consecutive_successes: 5
-  # Eight broad hazards fill this 4 m zone without the excessive overlap that
-  # twenty 0.60 m-diameter bowls would create.
+  # Restore the established near-route random terrain and full-size geometry.
   max_features: 8
   evaluation_features: 8
   zone_x_m: [1.2, 5.2]
-  max_center_offset_m: 0.10
+  # Every feature center is sampled uniformly between the two wheel-center
+  # lines: ±wheel_separation_m/2 from the chassis centerline.
+  wheel_separation_m: 0.34273666
   max_lateral_center_m: 1.55
   pothole_radius_m: 0.30
   bump_radius_m: 0.12
   cable_radius_m: 0.015
   cable_length_m: 0.55
+  # Runtime-spawned transverse groove surrogate: two sloped 20 mm shoulders
+  # around a floor-level channel (Gazebo cannot subtract the existing floor).
+  groove_half_width_m: 0.05
+  groove_length_m: 0.70
 
 domain_randomization:
-  # Disabled by default so phase difficulty is based only on cable size/angle.
+  # Disabled by default: phases change cable size/angle without also
+  # perturbing the residual actuator channel.
   # It can still be enabled explicitly for robustness experiments.
   enabled: false
   phase_scales: [1.0, 0.8, 0.6, 0.4, 0.2, 0.0]
@@ -278,6 +290,8 @@ ppo:
   actor_layers: [128, 128]
   critic_layers: [256, 128]
   history_features: 64
-  log_std_init: -1.38629436112  # sigma=0.25, instead of SB3 default sigma=1
+  log_std_init: -1.38629436112  # fallback only when initial_action_std is omitted
+  # Independent, trainable exploration scales: speed, common torque, steering.
+  initial_action_std: [0.20, 0.12, 0.05]
   initial_speed_scale: 0.70
   activation: elu

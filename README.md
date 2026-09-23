@@ -23,11 +23,15 @@ discovery, preventing another machine or simulator from injecting a conflicting
 `export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST` in that shell.
 
 - [Reward, policy and engineering decisions](src/nino_rl/RL_IMPROVEMENTS.md)
+- [Timeout diagnosis and revision 27 validation](docs/RL_TRAINING_DIAGNOSIS_20260922.md)
+- [Goal-first reward, policy and terrain curriculum (revision 30)](docs/RL_GOAL_FIRST_REVISION_28.md)
 - [Vietnamese quick guide](src/nino_rl/README_VI.md)
 - [Bài viết nghiên cứu tổng quan bằng tiếng Việt](docs/BAO_CAO_NGHIEN_CUU_RL_NINO.md)
 - [Simulation and hardware reference](docs/HARDWARE_REFERENCE.md)
 
-The current training contract is revision 26. Because its reward balance,
+The current training contract is revision 30. Because its goal-distance reward,
+restored full-size terrain, per-action exploration, physics-completion timing,
+sensor-invisible goal marker, reward balance,
 traversable-challenge flags, terrain geometry, downward preview, and rolling
 hazard curriculum changed, older checkpoints cannot be resumed; start a new
 run. New checkpoints retain rolling curriculum state, so
@@ -181,7 +185,7 @@ navigation:
   goal_pose: [6.0, 0.0, 0.0]
   straight_speed_m_s: 0.75
   minimum_approach_speed_m_s: 0.03
-  goal_slowdown_distance_m: 1.00
+  goal_slowdown_distance_m: 0.50
 ```
 
 The robot is successful only while its center is inside the 10 cm endpoint
@@ -199,12 +203,20 @@ consecutive successful episodes. Any failure breaks the streak, and adding a
 hazard clears the streak. The cap is eight adaptive hazards plus the single
 phase cable. Rolling results and the
 current hazard count are stored in every regular, final, and interrupted
-checkpoint. Pothole-like patches, low stepped bumps, and short transverse
-cables are randomized per episode inside the training zone, with centers within
-10 cm of the nominal path. The 35 cm post geometry is classified as a blocking
+checkpoint. The established pothole-like patches, low stepped bumps, short
+transverse cables, and road-groove surrogates are randomized per episode inside
+the four-metre training zone. Every center is uniformly sampled between the
+left and right wheel-center lines (approximately ±17.1 cm). The 35 cm post geometry is classified as a blocking
 route-planning obstacle and is never sampled or rewarded as a wheel-control
-challenge. The curriculum tops out at eight traversable hazards to avoid
-overlapping the broad bowls inside the four-metre zone.
+challenge. Adaptive geometry remains at full height in every phase: in
+particular, the pothole basin keeps its 30 mm relief. The phase cable changes
+diameter and skew; its tilt sign is randomized every episode, including the
+easiest phase's ±5-degree cable.
+
+The road groove uses two gently sloped, 20 mm-high shoulders around a 100 mm
+floor-level transverse channel. This creates a physical relative drop for the
+wheels. Gazebo cannot subtract a runtime hole from the hall floor, so it is a
+local raised-road surrogate rather than below-world geometry.
 
 Speed is a learned continuous action: PPO scales the 0.75 m/s straight
 reference from 0 to 100% on every 0.1 s policy step. A 20 Hz downward-looking
@@ -222,16 +234,19 @@ mode: it is the physical result of bounded torque, velocity targets, and the
 controller's wheel-acceleration/slew limits.
 
 Traversable challenges use one-shot privileged reward flags that are not added
-to the actor observation. Entering a challenge can earn at most +10 over the
-whole episode, clearing its local forward edge at most +30, and a successful
-goal earns up to another +60 in proportion to the fraction cleared. These
+to the actor observation. Flags require a powered wheel's swept footprint to
+intersect the region, rather than merely passing a bump under the chassis.
+This is a geometric crossing estimate, not a physical contact-force sensor.
+Entering a challenge can earn at most +2 over the
+whole episode, clearing its local forward edge at most +8, and a successful
+goal earns up to another +90 in proportion to the fraction cleared. These
 totals are divided across the episode's challenge count, so adding hazards does
 not inflate the maximum return. Oscillation cannot collect a flag twice, and a
 collision, rollover, timeout, off-path, or wrong-direction step earns no new
 challenge bonus. Episode reports and TensorBoard include chosen/cleared counts
 and fractions under `challenge_*` fields.
 
-The randomized pothole is a 0.60 m round, 30 mm-deep relative basin with smooth
+At phase 1, the randomized pothole is a 0.60 m round, 30 mm-deep relative basin with smooth
 approximately 12.5-degree entry/exit ramps and a roughly 3 mm leading edge. It
 is sized to admit the 16 mm caster wheels while still requiring useful drive
 effort. Gazebo cannot subtract a randomly spawned shape from the existing flat
@@ -282,7 +297,7 @@ ros2 run nino_rl train --device cuda --phase 1 --timesteps 500000 \
 ```
 
 The run prints its directory, e.g. `rl_runs/20260917-123456-123456/`. It contains
-`ppo.yaml`, software/device metadata, `monitor.csv`, TensorBoard logs,
+`ppo.yaml`, software/device metadata, `monitor.csv`, `episodes.jsonl`, TensorBoard logs,
 `checkpoints/nino_ppo_*_steps.zip` and `nino_ppo_final.zip` when finished.
 Rollouts are 2048 steps, so SB3 can exceed the requested step count to complete
 a rollout. Training is already active while those steps are collected; the
@@ -296,6 +311,25 @@ Terminal C:
 ```bash
 tensorboard --logdir rl_runs --port 6006
 ```
+
+Judge learning using `episode/success`, `episode/timeout_failure`, and
+`episode/endpoint_distance_m` together. `episode_reward/*` shows whole-episode
+reward totals, while `reward_terms/*` shows per-step averages. The corrected
+timing should keep `episode/max_clock_error_seconds` near zero and
+`episode/max_motion_sensor_lag_seconds` below 0.04 s. Individual records are
+saved in `episodes.jsonl`, including the termination reason and curriculum phase.
+Revision 28 needs a fresh run; older models learned under different timing and
+reward semantics. Restart the simulator after rebuilding so both lidar masks
+exclude the decorative goal beacon.
+
+Progress now measures reduction in actual endpoint distance, including lateral
+misses and overshoot. The speed reference stays low after passing the goal;
+more than 0.30 m longitudinal overshoot ends the forward-only task with
+`goal_missed` and a failure penalty. An in-circle heading error retains a small
+forward reference so PPO still has differential steering authority. Initial
+Gaussian standard deviations are `[0.20, 0.12, 0.05]` for speed/common torque/
+steering; each remains trainable. Watch `policy/std_*` and
+`episode/goal_missed_failure` alongside the other outcomes.
 
 Open `http://localhost:6006`. Inspect success, path RMSE/P95, completion,
 heading RMSE, impact RMS, torque, reward terms and PPO KL/entropy together.

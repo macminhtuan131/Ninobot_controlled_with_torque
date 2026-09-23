@@ -187,10 +187,18 @@ def run_preflight(config: dict, timeout: float = 30.0) -> list[str]:
             )
         )
         node.set_world_paused(True, timeout=lockstep_timeout)
-        node.begin_lockstep_epoch(timeout=lockstep_timeout)
+        epoch = node.begin_lockstep_epoch(timeout=lockstep_timeout)
+        chunk_steps = max(1, round(0.05 / node.physics_step_seconds))
+        credited = 0.0
+        for _ in range(2):
+            credited += node.advance_world(chunk_steps, timeout=lockstep_timeout)
+            error = node.latest_clock_stamp() - (epoch + credited)
+            if abs(error) > max(0.02, 2 * node.physics_step_seconds):
+                raise RuntimeError(f"Lockstep credited time differs from /clock by {error:.6f}s")
+        node.wait_for_motion_state(epoch + credited, timeout=lockstep_timeout)
         node.set_world_paused(False, timeout=lockstep_timeout)
         passed.append(
-            "12 RL residual and lockstep interfaces physically control the world"
+            "12 RL residual and lockstep interfaces physically control the world; clock and motion feedback agree"
         )
         return sorted(passed, key=lambda value: int(value.split()[0]))
     finally:

@@ -58,7 +58,8 @@ no recurrent hidden state. This architecture is retained from the base revision.
 The actor samples a diagonal Gaussian during training; SB3 uses its original
 log probabilities and clips the executed actions to [-1,1]. Deterministic
 evaluation uses the mean. This is not a manually squashed/tanh Gaussian.
-Initial standard deviation is 0.25; initial speed bias is 0.4 (approximately
+Initial standard deviations are `[0.20, 0.12, 0.05]` for speed, common torque,
+and differential steering; initial speed bias is 0.4 (approximately
 70% speed), with zero residual biases. Small initial head weights make the
 mean slightly state-dependent. Exploration variance is learned.
 
@@ -66,8 +67,8 @@ For actions \(a=[a_s,a_f,a_y]\):
 
 \[
 s=(a_s+1)/2,\quad
-\Delta\tau_L=0.5\,\mathrm{clip}(a_f-a_y,-1,1),\quad
-\Delta\tau_R=0.5\,\mathrm{clip}(a_f+a_y,-1,1).
+\Delta\tau_L=2.0\,\mathrm{clip}(a_f-a_y,-1,1),\quad
+\Delta\tau_R=2.0\,\mathrm{clip}(a_f+a_y,-1,1).
 \]
 
 The controller scales the Nav2 reference, calculates PI wheel torque, adds
@@ -94,14 +95,14 @@ Only `control_v2.compute_reward` and YAML `reward_v2` are active. The legacy
 
 Let \(h=\Delta t/0.1\), \(C(x)=\min(x^2,9)\),
 \(K(e,\sigma)=1-\exp[-\min((e/\sigma)^2,81)]\).
-Let \(d\) be remaining reference arc length, \(e_y\) signed perpendicular
+Let \(d\) be Euclidean distance to the endpoint, \(e_y\) signed perpendicular
 path error, \(e_\psi\) wrapped heading error, \(\tau\) the post-limit total
 controller effort, and \(\delta\tau\) the perturbed residual command.
 The total reward is the sum of these terms:
 
 | Term | Formula/default |
 |---|---|
-| Signed progress | \(20(d_{t-1}-d_t)\), gated by path alignment for forward motion |
+| Signed progress | \(10(d_{t-1}-d_t)\), gated by path alignment for forward motion |
 | Lateral | \(-0.50h C(e_y/0.25)\) |
 | Heading | \(-0.25h C(e_\psi/0.35)\) |
 | Linear reference tracking | \(-w_v h K(v-v_{ref},1.20)\) |
@@ -116,17 +117,27 @@ The total reward is the sum of these terms:
 | Total torque change | \(-0.02\operatorname{mean}(((\tau_t-\tau_{t-1})/5.0)^2)/h\) |
 | **Operating-envelope saturation** | \(-0.03h\operatorname{mean}[\mathrm{clip}((|\tau|/5.0-0.9)/0.1,0,1)^2]\) |
 | Goal braking | \(-0.15h e^{-(d_{end}/0.8)^2}[C(v/1.20)+C(\omega/0.30)]\) |
-| Time | \(-0.01h\) |
+| Time | \(-0.05h\) |
 | Stall | \(-0.5h\) when the existing 3-second progress window flags a stall |
 | On-time success | up to +50, proportional to positive margin before the 15-second target |
-| Terminal | +100 success; -100 collision/rollover/wrong direction; -75 off path; deadline \(-100[0.5+0.5(1-c)]\) |
+| Challenge entry / clear | up to +2 / +8 per episode; one payment per unique hazard |
+| Challenge goal | up to +90 at successful arrival, proportional to hazards cleared |
+| Terminal | +100 success; -100 collision/rollover/wrong direction/deadline; -75 off path |
 
 Here \(q=\min(1,0.25+(phase-1)/5)\), \((x)_+=\max(0,x)\), and
 \(w_v=0.40\) for overspeed in the commanded direction or movement under a
 zero command; otherwise \(w_v=0.10\). The reference is captured before the
 action and is not scaled by the actor, so stopping does not erase its own
 tracking error. Gazebo truth speeds affect reward only. Reward terms are logged
-individually in TensorBoard.
+individually in TensorBoard. `reward_terms/*` averages per-step contributions;
+`episode_reward/*` averages complete episode totals. `episodes.jsonl` preserves
+individual outcomes, including episodes from an unfinished PPO rollout.
+
+On the default 6 m path, progress contributes at most +60 undiscounted and
+entry/clear shaping at most +10. Every failure penalty exceeds their sum.
+The successful difficult-path budget is still +100, now mostly paid at arrival.
+This is a return-budget check for the configured route, not a guarantee of
+convergence or a claim about every discounted trajectory.
 
 The saturation term is zero below 4.5 Nm and reaches -0.03 per 0.1-second
 step when both wheels reach 5.0 Nm. This is the effective PI-plus-residual
@@ -148,12 +159,19 @@ abort the run rather than becoming learned collision penalties.
 
 ## Timing and robustness changes
 
-- The IMU subscription buffers 100 samples instead of one. Each policy action
-  advances Gazebo by exactly 100 one-ms physics steps while the world otherwise
-  remains paused. Impact scoring requires at least 80% interval coverage and a
-  bounded endpoint lag; a post-step barrier also requires fresh odometry,
-  ground-truth velocity, joints, laser, and applied-torque feedback. Real missing
-  coverage still aborts. IMU periods/gaps retain the 0.1 s hold cap.
+- Each nominal action advances 50 two-ms physics steps in two chunks. Gazebo's
+  service response acknowledges queuing; it is not proof that physics finished.
+  Each chunk now waits for its full `/clock` target before returning. Partial
+  progress cannot consume a complete action's mission budget. A rare extra
+  terrain-render period is accounted in the action duration.
+- Motion feedback (odometry, truth velocity, joints, IMU) must be timestamped
+  within 40 ms of the completed action boundary. A wall-fresh message from the
+  start of the action cannot satisfy that barrier. Episode clock drift beyond
+  20 ms aborts training. TensorBoard logs actual clock duration, maximum clock
+  error, sensor lag, and every termination rate.
+- The goal beacon is a GUI decoration on visibility bit 0x04. Both GPU lidars
+  exclude that bit. Without this mask its visual pole was detected as an
+  obstacle even though it had no physical collision geometry.
 - Residual command delay is expressed in physics steps, not wall-clock sleep.
   Bounded wall timeouts catch failed Gazebo steps or missing ROS feedback.
   Physics advancement is lockstep; ROS transport and Nav2 remain asynchronous
@@ -169,7 +187,12 @@ abort the run rather than becoming learned collision penalties.
 - Randomized evaluation uses full strength. Baseline always has zero residual
   torque. Both evaluators consume the same random draws and use the same
   metrics pipeline, with no competing simultaneous process.
-- Training contract revision 26 includes the automatic phase schedule, task, observation, traversable
+- Training contract revision 30 adds endpoint-distance progress, overshoot failure,
+  bounded final approach, wheel-footprint challenge tracking, restored full-size
+  near-route terrain, full wheel-span center randomization, a road-groove
+  surrogate, randomized cable tilt, and per-action exploration.
+  It retains corrected stepping, sensor synchronization,
+  goal visibility, reward balance, automatic phase schedule, task, observation, traversable
   challenge reward, geometry, and randomization settings, while permitting
   phase changes, seed/device changes and terrain curriculum adjustments.
   Incompatible resumes fail instead of silently changing the learning

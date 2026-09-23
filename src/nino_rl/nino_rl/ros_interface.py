@@ -188,6 +188,7 @@ class RosRobotInterface(Node):
 
     def _ground_truth_callback(self, message: Odometry) -> None:
         with self._lock:
+            self._state.ground_truth_stamp_s = message.header.stamp.sec + message.header.stamp.nanosec * 1e-9
             self._state.ground_linear_velocity = float(message.twist.twist.linear.x)
             self._state.ground_yaw_rate = float(message.twist.twist.angular.z)
             self._mark_received("ground_truth")
@@ -226,6 +227,7 @@ class RosRobotInterface(Node):
             # whole sample, including actor state, based on simulation time.
             if stamp <= self._imu_epoch_min_stamp:
                 return
+            self._state.imu_stamp_s = stamp
             self._state.roll = roll
             self._state.pitch = pitch
             self._state.orientation_x = float(orientation[0])
@@ -247,6 +249,7 @@ class RosRobotInterface(Node):
         if "left_wheel_joint" not in velocity or "right_wheel_joint" not in velocity:
             return
         with self._lock:
+            self._state.joint_stamp_s = message.header.stamp.sec + message.header.stamp.nanosec * 1e-9
             self._state.left_wheel_velocity = float(velocity["left_wheel_joint"])
             self._state.right_wheel_velocity = float(velocity["right_wheel_joint"])
             self._mark_received("joint")
@@ -683,6 +686,27 @@ class RosRobotInterface(Node):
                     raise RuntimeError(detail) from error
                 self.get_logger().warn(detail)
 
+    def wait_for_motion_state(self, end, timeout=2.0, max_lag=0.04):
+        """Require 50 Hz motion feedback from the end of this action.
+
+        Receiving a new message alone is insufficient: it can describe the
+        beginning of a chunk or an earlier action still in the DDS queue.
+        """
+        if not all(isfinite(value) for value in (end, timeout, max_lag)) or timeout <= 0 or max_lag < 0:
+            raise ValueError("Motion barrier needs finite time, positive timeout and nonnegative lag")
+        deadline = monotonic() + timeout
+        while True:
+            with self._lock:
+                lags = {name: end - getattr(self._state, name + "_stamp_s")
+                        for name in ("odom", "ground_truth", "joint", "imu")}
+            missing = {name: lag for name, lag in lags.items()
+                       if not isfinite(lag) or lag > max_lag + 1e-9 or lag < -max_lag - 1e-9}
+            if not missing:
+                return lags
+            if monotonic() >= deadline:
+                raise RuntimeError(f"Motion feedback is outside action boundary {end:.6f}: lags={missing}")
+            sleep(0.002)
+
     def wait_for_v2_controller(self, timeout=5.0):
         deadline = monotonic() + timeout
         while self.control_publisher.get_subscription_count() == 0:
@@ -783,12 +807,12 @@ class RosRobotInterface(Node):
     def advance_world(
         self, physics_steps, timeout=5.0, min_completion_fraction=0.80
     ):
-        """Advance a paused world and return the credited simulation duration.
+        """Wait for physics completion, not just acceptance of multi_step.
 
-        The Gazebo multi_step command is atomic. /clock is used only as
-        independent evidence because its depth-1 BEST_EFFORT bridge can omit
-        the last samples; raw callback timestamps must not redefine the fixed
-        policy interval.
+        Gazebo acknowledges queued work before executing it. Returning on that
+        acknowledgment lets actions and sensor reads run ahead of the world.
+        Both an accepted (or lost) response AND clock completion are required
+        before another chunk may be submitted. Never retry a physics request.
         """
         if not isinstance(physics_steps, int) or physics_steps < 1:
             raise ValueError("physics_steps must be a positive integer")
@@ -809,40 +833,34 @@ class RosRobotInterface(Node):
         deadline = monotonic() + timeout
         clock_after = clock_before
 
-        # Race the bridge response against physical completion. Waiting for a
-        # lost response for the entire (normally 10 s) service timeout made a
-        # correctly completed 50 ms chunk take 10 wall seconds. /clock is the
-        # independent completion proof already used by the timeout fallback.
+        response_checked = False
         while monotonic() < deadline:
-            if future.done():
+            if not response_checked and future.done():
                 exception = future.exception()
                 if exception is not None:
                     raise RuntimeError(str(exception)) from exception
                 result = future.result()
                 if result is None or not result.success:
                     raise RuntimeError("Gazebo rejected lockstep physics request")
-                return requested_duration
+                response_checked = True
 
             with self._lock:
                 if self._sim_clock_stamp is not None:
                     clock_after = self._sim_clock_stamp
             if clock_after >= target - 0.5 * self.physics_step_seconds:
-                # Give ros_gz_bridge time to retire the request normally. A
-                # 50 ms grace left completed calls in the single service
-                # bridge while the next lockstep request was submitted,
-                # eventually creating a queue that stopped world progress.
-                # Physics completion is already independently proven by clock.
-                response_deadline = monotonic() + min(0.25, 0.1 * timeout)
-                while monotonic() < response_deadline and not future.done():
+                # A missing reply is tolerable only after full physical
+                # completion. Allow the service bridge to retire it normally.
+                response_deadline = min(deadline, monotonic() + 0.25)
+                while not response_checked and monotonic() < response_deadline and not future.done():
                     sleep(0.002)
-                if future.done():
+                if not response_checked and future.done():
                     exception = future.exception()
                     if exception is not None:
                         raise RuntimeError(str(exception)) from exception
                     result = future.result()
                     if result is None or not result.success:
                         raise RuntimeError("Gazebo rejected lockstep physics request")
-                else:
+                elif not response_checked:
                     try:
                         self.world_control.remove_pending_request(future)
                     except RuntimeError:
@@ -850,40 +868,19 @@ class RosRobotInterface(Node):
                 return requested_duration
             sleep(0.002)
 
-        # A depth-1 BEST_EFFORT /clock subscription can miss the final samples
-        # even though the atomic request stopped with the world paused. Accept
-        # a quiescent near-complete interval, but never retry the request: that
-        # could execute the same policy interval twice.
-        clock_quiescent = False
-        try:
-            clock_after = self.wait_for_clock_quiescence(
-                timeout=min(2.0, max(0.2, timeout)), quiet_time=0.10
-            )
-            clock_quiescent = True
-        except (RuntimeError, ValueError):
-            pass
-        advanced = max(0.0, clock_after - clock_before)
-        if (
-            clock_quiescent
-            and advanced >= min_completion_fraction * requested_duration
-        ):
-            if not future.done():
-                try:
-                    self.world_control.remove_pending_request(future)
-                except RuntimeError:
-                    pass
-            self.get_logger().warn(
-                "World-control response timed out; /clock verified a "
-                f"paused near-complete atomic chunk "
-                f"{advanced:.6f}/{requested_duration:.6f}s"
-            )
-            return requested_duration
+        # Acknowledgment or partial progress must never consume the full
+        # mission budget. Fail closed instead of silently scoring unrun time.
+        # min_completion_fraction remains accepted for older callers only.
+        if not future.done():
+            try:
+                self.world_control.remove_pending_request(future)
+            except RuntimeError:
+                pass
         raise TimeoutError(
-            "World-control response timed out and verified progress was "
-            "below the safe completion threshold "
+            "Lockstep physics did not reach its clock target "
             f"(before={clock_before:.6f}, after={clock_after:.6f}, "
-            f"target={target:.6f}, minimum_fraction="
-            f"{min_completion_fraction:.3f})"
+            f"target={target:.6f}, acknowledged={response_checked}). "
+            "No simulation time was credited; the request was not retried."
         )
 
     def reset_drive_state(self, timeout=5.0):
@@ -1444,18 +1441,22 @@ class RosRobotInterface(Node):
 
     @staticmethod
     def _goal_marker_sdf(name: str, radius: float = 0.10) -> str:
-        """Return a bright, visual-only goal beacon that cannot affect physics."""
+        """Goal decoration on visibility bit 0x04, excluded by both lidars.
+
+        GPU LiDAR renders visuals, including those without collision shapes.
+        A normal visual pole was a false obstacle immediately before success.
+        """
         return f"""<?xml version='1.0'?>
 <sdf version='1.9'><model name='{name}'><static>true</static><link name='marker'>
-<visual name='goal_disc'><pose>0 0 0.01 0 0 0</pose><geometry><cylinder>
+<visual name='goal_disc'><visibility_flags>4</visibility_flags><pose>0 0 0.01 0 0 0</pose><geometry><cylinder>
 <radius>{radius:.6f}</radius><length>0.02</length></cylinder></geometry><material>
 <ambient>0.05 1 0.05 1</ambient><diffuse>0.05 1 0.05 1</diffuse>
 <emissive>0 0.6 0 1</emissive></material></visual>
-<visual name='goal_pole'><pose>0 0 0.50 0 0 0</pose><geometry><cylinder>
+<visual name='goal_pole'><visibility_flags>4</visibility_flags><pose>0 0 0.50 0 0 0</pose><geometry><cylinder>
 <radius>0.025</radius><length>1.0</length></cylinder></geometry><material>
 <ambient>0.05 1 0.05 1</ambient><diffuse>0.05 1 0.05 1</diffuse>
 <emissive>0 0.6 0 1</emissive></material></visual>
-<visual name='goal_flag'><pose>0.14 0 0.82 0 0 0</pose><geometry><box>
+<visual name='goal_flag'><visibility_flags>4</visibility_flags><pose>0.14 0 0.82 0 0 0</pose><geometry><box>
 <size>0.28 0.02 0.20</size></box></geometry><material>
 <ambient>0.05 1 0.05 1</ambient><diffuse>0.05 1 0.05 1</diffuse>
 <emissive>0 0.6 0 1</emissive></material></visual>
@@ -1530,7 +1531,7 @@ class RosRobotInterface(Node):
 
     @staticmethod
     def _adaptive_terrain_sdf(
-        name: str, features: list[tuple[str, float, float, float]]
+        name: str, features: list[tuple[str, float, float, float]],
     ) -> str:
         """Build one static model containing randomized path hazards."""
         from math import atan2, cos, pi, sin
@@ -1577,6 +1578,37 @@ class RosRobotInterface(Node):
 <visual name='{prefix}_visual'><pose>{x:.6f} {y:.6f} {size:.6f} 1.57079632679 0 0</pose>
 <geometry><cylinder><radius>{size:.6f}</radius><length>{length:.6f}</length></cylinder></geometry>
 <material><ambient>0.08 0.08 0.08 1</ambient><diffuse>0.12 0.12 0.12 1</diffuse></material></visual>"""
+            elif kind == "groove":
+                # Gazebo cannot subtract a runtime shape from the hall floor.
+                # Two shallow, sloped road shoulders create a physical 20 mm
+                # relative drop into the floor-level transverse channel. The
+                # 6 mm bodies are mostly embedded, leaving gentle outer edges.
+                length = 0.70
+                ramp_width = 1.8 * size
+                depth = 0.4 * size
+                thickness = 0.006
+                slope = atan2(depth, ramp_width)
+                shoulder_parts = []
+                for side, offset, pitch in (
+                    ("before", -(size + 0.5 * ramp_width), -slope),
+                    ("after", size + 0.5 * ramp_width, slope),
+                ):
+                    cx = x + offset
+                    pose = f"{cx:.6f} {y:.6f} {0.5 * depth:.6f} 0 {pitch:.6f} 0"
+                    geometry = (
+                        f"<geometry><box><size>{ramp_width:.6f} {length:.6f} "
+                        f"{thickness:.6f}</size></box></geometry>"
+                    )
+                    shoulder_parts.append(f"""
+<collision name='{prefix}_{side}_collision'><pose>{pose}</pose>{geometry}
+<surface><friction><ode><mu>0.95</mu><mu2>0.95</mu2></ode></friction></surface></collision>
+<visual name='{prefix}_{side}_visual'><pose>{pose}</pose>{geometry}
+<material><ambient>0.26 0.27 0.29 1</ambient><diffuse>0.34 0.35 0.37 1</diffuse></material></visual>""")
+                body = f"""
+<visual name='{prefix}_channel'><pose>{x:.6f} {y:.6f} 0.001 0 0 0</pose>
+<geometry><box><size>{2.0 * size:.6f} {length:.6f} 0.002</size></box></geometry>
+<material><ambient>0.025 0.025 0.03 1</ambient><diffuse>0.04 0.04 0.05 1</diffuse></material></visual>
+{''.join(shoulder_parts)}"""
             elif kind == "pothole":
                 # Runtime spawning cannot subtract the hall's box floor. Use a
                 # round basin surrogate: 24 overlapping outer/inner ramps make

@@ -41,10 +41,15 @@ class HistoryActorCriticPolicy(ActorCriticPolicy):
     adding tanh to sampled actions without correcting their densities would
     invalidate PPO probability ratios. This is not a squashed-Gaussian policy.
     """
-    def __init__(self, *args, initial_speed_scale=0.70, **kwargs):
+    def __init__(self, *args, initial_speed_scale=0.70, initial_action_std=None, **kwargs):
         if not 0.0 < initial_speed_scale < 1.0:
             raise ValueError("initial_speed_scale must be strictly between 0 and 1")
         self.initial_speed_scale = initial_speed_scale
+        if initial_action_std is not None:
+            std = th.as_tensor(initial_action_std)
+            if std.shape != (3,) or not th.isfinite(std).all() or (std <= 0).any():
+                raise ValueError("initial_action_std needs three positive finite values")
+        self.initial_action_std = initial_action_std
         super().__init__(*args, **kwargs)
 
     def _build(self, lr_schedule):
@@ -54,10 +59,13 @@ class HistoryActorCriticPolicy(ActorCriticPolicy):
         with th.no_grad():
             self.action_net.bias.zero_()
             self.action_net.bias[0] = 2.0 * self.initial_speed_scale - 1.0
+            if self.initial_action_std is not None:
+                self.log_std.copy_(th.as_tensor(self.initial_action_std, device=self.log_std.device).log())
 
     def _get_constructor_parameters(self):
         data = super()._get_constructor_parameters()
         data["initial_speed_scale"] = self.initial_speed_scale
+        data["initial_action_std"] = self.initial_action_std
         return data
 
 
@@ -72,4 +80,5 @@ def policy_spec(config):
         "net_arch": {"pi": list(ppo["actor_layers"]), "vf": list(ppo["critic_layers"])},
         "log_std_init": float(ppo["log_std_init"]),
         "initial_speed_scale": float(ppo["initial_speed_scale"]),
+        "initial_action_std": ppo.get("initial_action_std"),
     }

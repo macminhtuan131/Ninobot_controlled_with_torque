@@ -4,6 +4,7 @@ from threading import Lock
 from types import SimpleNamespace
 import xml.etree.ElementTree as ET
 
+import pytest
 import yaml
 
 from nino_rl.ros_interface import RosRobotInterface
@@ -89,7 +90,8 @@ def test_lockstep_accepts_lost_service_response_immediately_after_clock_proof():
     assert not warnings
 
 
-def test_lockstep_accepts_quiescent_near_complete_clock_interval():
+def test_lockstep_rejects_partial_clock_interval_even_if_quiescent():
+    import pytest
     class Future:
         checks = 0
 
@@ -114,10 +116,48 @@ def test_lockstep_accepts_quiescent_near_complete_clock_interval():
     )
 
     ros.wait_for_clock_quiescence = lambda timeout, quiet_time: ros._sim_clock_stamp
-    result = RosRobotInterface.advance_world(ros, 25, timeout=0.01)
-    assert result == 0.05
+    with pytest.raises(TimeoutError, match="did not reach its clock target"):
+        RosRobotInterface.advance_world(ros, 25, timeout=0.01)
     assert len(removed) == 1
-    assert "near-complete atomic chunk" in warnings[0]
+    assert not warnings
+
+
+def test_lockstep_acknowledgment_cannot_complete_physics(monkeypatch):
+    import nino_rl.ros_interface as transport
+    from concurrent.futures import Future
+    future = Future()
+    future.set_result(SimpleNamespace(success=True))
+    ticks = []
+    ros = SimpleNamespace(
+        _lock=Lock(), _sim_clock_stamp=1.0, physics_step_seconds=.002,
+        world_control=SimpleNamespace(wait_for_service=lambda timeout_sec: True,
+                                      call_async=lambda request: future))
+
+    def tick(_):
+        ticks.append(1)
+        ros._sim_clock_stamp += .002
+
+    monkeypatch.setattr(transport, "sleep", tick)
+    assert RosRobotInterface.advance_world(ros, 25, timeout=1.) == .05
+    assert len(ticks) == 25  # An already-successful future is only acceptance.
+
+
+def test_motion_barrier_waits_for_action_end_not_wall_freshness(monkeypatch):
+    import nino_rl.ros_interface as transport
+    state = RobotState(odom_stamp_s=1.0, ground_truth_stamp_s=1.0,
+                       joint_stamp_s=1.0, imu_stamp_s=1.0)
+    ros = SimpleNamespace(_lock=Lock(), _state=state)
+    ticks = []
+
+    def deliver(_):
+        ticks.append(1)
+        for name in ("odom", "ground_truth", "joint", "imu"):
+            setattr(state, name + "_stamp_s", 1.08)
+
+    monkeypatch.setattr(transport, "sleep", deliver)
+    lags = RosRobotInterface.wait_for_motion_state(ros, 1.1, max_lag=.04)
+    assert len(ticks) == 1
+    assert all(0 <= value <= .04 for value in lags.values())
 
 
 def test_pause_accepts_lost_response_when_clock_confirms_state():
@@ -417,6 +457,12 @@ def test_goal_marker_is_visible_but_has_no_collision_geometry():
     root = ET.fromstring(namespace["_goal_marker_sdf"]("training_goal_marker", 0.10))
     assert len(root.findall(".//visual")) == 3
     assert root.find(".//collision") is None
+    flags = [int(v.find("visibility_flags").text) for v in root.findall(".//visual")]
+    robot = ET.parse(ROOT / "src/nino_description/urdf/nino.urdf.xacro")
+    masks = [int(lidar.find("visibility_mask").text) for lidar in robot.findall(".//lidar")]
+    assert len(masks) == 2
+    assert all(flags_value & mask == 0 for flags_value in flags for mask in masks)
+    assert all(0xFFFFFFFF & mask for mask in masks)  # Ordinary obstacles stay visible.
     assert float(root.find(".//visual[@name='goal_disc']//radius").text) == 0.10
 
     configure = next(
@@ -443,7 +489,7 @@ def test_episode_entities_use_known_names_after_initial_world_adoption():
         _training_cable_names=None,
         _adaptive_terrain_present=None,
         _cable_spawn_request=lambda name, x, radius, angle: object(),
-        _adaptive_terrain_sdf=lambda name, features: "<sdf/>",
+        _adaptive_terrain_sdf=lambda name, features, **kwargs: "<sdf/>",
     )
 
     def call(_client, request_factory, _timeout, operation):
@@ -526,11 +572,12 @@ def test_adaptive_terrain_sdf_separates_traversable_and_blocking_features():
         ("pothole", 3.0, 1.0, 0.18),
         ("bump", 4.0, -1.0, 0.12),
         ("cable", 5.0, 1.2, 0.015),
+        ("groove", 2.0, -0.1, 0.05),
     ])
     root = ET.fromstring(sdf)
-    assert len(root.findall(".//link")) == 3
-    assert len(root.findall(".//collision")) >= 6
-    assert "pothole" in sdf and "bump" in sdf and "cable" in sdf
+    assert len(root.findall(".//link")) == 4
+    assert len(root.findall(".//collision")) >= 8
+    assert all(kind in sdf for kind in ("pothole", "bump", "cable", "groove"))
     bump_collisions = [
         collision for collision in root.findall(".//collision")
         if "bump" in collision.attrib.get("name", "")
@@ -544,3 +591,11 @@ def test_adaptive_terrain_sdf_separates_traversable_and_blocking_features():
     assert len(pothole_collisions) == 48
     pitches = [abs(float(item.find("pose").text.split()[4])) for item in pothole_collisions]
     assert all(0.15 < pitch < 0.30 for pitch in pitches)
+    groove_collisions = [
+        collision for collision in root.findall(".//collision")
+        if "groove" in collision.attrib.get("name", "")
+    ]
+    assert len(groove_collisions) == 2
+    groove_pitches = [float(item.find("pose").text.split()[4]) for item in groove_collisions]
+    assert groove_pitches[0] == pytest.approx(-groove_pitches[1])
+    assert 0.20 < abs(groove_pitches[0]) < 0.25

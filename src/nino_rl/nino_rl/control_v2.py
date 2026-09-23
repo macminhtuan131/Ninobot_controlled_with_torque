@@ -34,7 +34,7 @@ class ChallengeRegion:
         values = (self.x, self.y, self.radius, self.half_length, self.angle)
         if (
             not self.name
-            or self.kind not in ("pothole", "bump", "cable")
+            or self.kind not in ("pothole", "bump", "cable", "groove")
             or not np.all(np.isfinite(values))
             or self.radius <= 0.0
             or self.half_length < 0.0
@@ -82,7 +82,8 @@ class ChallengeRegion:
 class ChallengeTracker:
     """One-shot difficult-path flags that cannot be farmed by oscillating."""
 
-    def __init__(self, regions=(), contact_margin=0.20, clearance_margin=0.30):
+    def __init__(self, regions=(), contact_margin=0.20, clearance_margin=0.30,
+                 wheel_separation=None, wheel_width=0.047):
         self.regions = tuple(regions)
         if (
             len({region.name for region in self.regions}) != len(self.regions)
@@ -94,6 +95,13 @@ class ChallengeTracker:
             raise ValueError("Invalid challenge tracker geometry")
         self.contact_margin = float(contact_margin)
         self.clearance_margin = float(clearance_margin)
+        if wheel_separation is not None and (
+            not np.isfinite(wheel_separation) or wheel_separation <= 0
+            or not np.isfinite(wheel_width) or wheel_width <= 0
+        ):
+            raise ValueError("Wheel challenge tracking requires positive dimensions")
+        self.wheel_separation = wheel_separation
+        self.wheel_width = wheel_width
         self.chosen: set[str] = set()
         self.cleared: set[str] = set()
 
@@ -101,7 +109,7 @@ class ChallengeTracker:
     def total(self) -> int:
         return len(self.regions)
 
-    def update(self, previous_xy, current_xy) -> tuple[int, int]:
+    def update(self, previous_xy, current_xy, previous_yaw=0., current_yaw=0.) -> tuple[int, int]:
         previous = np.asarray(previous_xy, dtype=float)
         current = np.asarray(current_xy, dtype=float)
         if (
@@ -112,11 +120,22 @@ class ChallengeTracker:
         ):
             raise ValueError("Challenge tracking needs two finite XY poses")
         midpoint = 0.5 * (previous + current)
+        points = (previous, midpoint, current)
+        margin = self.contact_margin
+        if self.wheel_separation is not None:
+            if not np.isfinite([previous_yaw, current_yaw]).all():
+                raise ValueError("Wheel tracking requires finite headings")
+            def wheels(center, yaw):
+                offset = .5 * self.wheel_separation * np.array([-sin(yaw), cos(yaw)])
+                return center - offset, center + offset
+            before, after = wheels(previous, previous_yaw), wheels(current, current_yaw)
+            points = (*before, *(0.5 * (a+b) for a, b in zip(before, after)), *after)
+            margin = self.wheel_width / 2.
         newly_chosen = newly_cleared = 0
         for region in self.regions:
             if region.name not in self.chosen and any(
-                region.touches(float(point[0]), float(point[1]), self.contact_margin)
-                for point in (previous, midpoint, current)
+                region.touches(float(point[0]), float(point[1]), margin)
+                for point in points
             ):
                 self.chosen.add(region.name)
                 newly_chosen += 1
@@ -316,7 +335,13 @@ def compute_reward(previous, current, state, action, previous_action, torque,
         raise ValueError("Invalid traversable challenge counts")
     h = dt / 0.1
     cap = lambda x: min(float(x) ** 2, 9.0)
-    delta = previous.distance_remaining - current.distance_remaining
+    progress_metric = cfg.get("progress_metric", "path")
+    if progress_metric not in ("endpoint", "path"):
+        raise ValueError("progress_metric must be endpoint or path")
+    if progress_metric == "endpoint":
+        delta = previous.endpoint_distance - current.endpoint_distance
+    else:
+        delta = previous.distance_remaining - current.distance_remaining
     # Credit forward motion fully only when it follows the straight
     # centerline. Reverse motion retains its full penalty so this gate cannot
     # be exploited by driving back while misaligned.

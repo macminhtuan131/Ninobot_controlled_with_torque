@@ -20,6 +20,7 @@ from nino_rl.core import (
     load_config,
 )
 from nino_rl.ros_interface import RosRobotInterface
+from nino_rl.task_geometry import approach_speed, goal_overshot
 from nino_rl.control_v2 import (
     BASELINE_ACTION, STOP_ACTION, ObservationHistory, make_observation,
     decode_action, validate_model,
@@ -102,22 +103,8 @@ class PolicyNode(RosRobotInterface):
         _, tracking = make_observation(
             state, self.path, self.lookahead, self.previous_action
         )
-        remaining = max(
-            0.0, tracking.endpoint_distance - float(self.config["goal_tolerance_m"])
-        )
-        speed = 0.0 if remaining <= 0.0 else max(
-            self.minimum_approach_speed,
-            self.straight_speed * float(
-                np.clip(
-                    remaining / max(
-                        self.goal_slowdown_distance,
-                        float(self.config["goal_tolerance_m"]),
-                    ),
-                    0.0,
-                    1.0,
-                )
-            ),
-        )
+        speed = approach_speed(tracking.endpoint_distance, tracking.distance_remaining,
+                               tracking.heading_error, self.config)
         self.publish_straight_command(speed)
         elapsed = self.get_clock().now().nanoseconds * 1e-9 - self.path_started_at
         desired_linear, desired_angular = self.desired_twist()
@@ -179,6 +166,7 @@ class PolicyNode(RosRobotInterface):
         )
         if (
             goal_reached(tracking, state, self.config)
+            or goal_overshot(state, self.path, self.config)
             or timed_out
             or wrong_direction
             or abs(tracking.lateral_error) >= self.off_path_limit

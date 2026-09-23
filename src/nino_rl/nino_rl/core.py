@@ -145,6 +145,9 @@ def catmull_rom_path(
 @dataclass
 class RobotState:
     odom_stamp_s: float = 0.0
+    ground_truth_stamp_s: float = -float("inf")
+    joint_stamp_s: float = -float("inf")
+    imu_stamp_s: float = -float("inf")
     x: float = 0.0
     y: float = 0.0
     yaw: float = 0.0

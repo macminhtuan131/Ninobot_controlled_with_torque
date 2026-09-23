@@ -11,6 +11,7 @@ import numpy as np
 import yaml
 
 from nino_rl.trajectory_metrics import EpisodeTrajectory
+from nino_rl.task_geometry import goal_overshot
 from nino_rl.core import RobotState, PathTracker, TrackingState, NavReference, goal_reached, is_wrong_direction, metrics_dict, wheel_slip_ratios
 from nino_rl.control_v2 import (
     BASELINE_ACTION, STOP_ACTION, ChallengeRegion, ChallengeTracker, FRAME_SIZE,
@@ -149,7 +150,7 @@ class TestV2(unittest.TestCase):
         self.assertEqual(self.reward(failed="off_path")[1]["terminal"], -75)
         self.assertEqual(self.reward(timed_out=True)[1]["terminal"], -100)
 
-    def test_timeout_penalty_scales_with_route_completion(self):
+    def test_timeout_does_not_forgive_failure_for_partial_progress(self):
         previous = TrackingState(0, 0, 0, 30, 30)
         current = TrackingState(24, 0, 0, 6, 6)
         _, terms = compute_reward(
@@ -158,7 +159,7 @@ class TestV2(unittest.TestCase):
             {**CONFIG["reward_v2"], "torque_scale_nm": .5},
             timed_out=True, completion_fraction=.8,
         )
-        self.assertAlmostEqual(terms["terminal"], -60.0)
+        self.assertAlmostEqual(terms["terminal"], -100.0)
 
     def test_success_rewards_positive_target_time_margin(self):
         _, early = self.reward(
@@ -285,7 +286,7 @@ class TestEnvironmentContract(unittest.TestCase):
     def run_step(self, collision=False, timed_out=False, torque_fresh=True,
                  baseline=False, torque_noise=0., navigation_invalid=False,
                  goal_reached_position=False, goal_crossed=False, lidar_stale=False,
-                 lidar_sim_lag=False):
+                 lidar_sim_lag=False, goal_missed=False):
         source = ROOT / "src/nino_rl/nino_rl/ros_env.py"
         cls = next(x for x in ast.parse(source.read_text()).body if isinstance(x, ast.ClassDef))
         step = next(x for x in cls.body if isinstance(x, ast.FunctionDef) and x.name == "step")
@@ -296,12 +297,12 @@ class TestEnvironmentContract(unittest.TestCase):
         namespace = dict(np=np, sleep=sleep, monotonic=lambda: clock[0],
             degrees=degrees, deepcopy=deepcopy, decode_action=decode_action,
             make_observation=make_observation, compute_reward=compute_reward,
-            goal_reached=goal_reached, is_wrong_direction=is_wrong_direction,
+            goal_reached=goal_reached, goal_overshot=goal_overshot, is_wrong_direction=is_wrong_direction,
             metrics_dict=metrics_dict, wheel_slip_ratios=wheel_slip_ratios)
         exec(compile(ast.Module(body=[step], type_ignores=[]), str(source), "exec"), namespace)
         state = RobotState(odom_stamp_s=.1,
                            lidar_stamp_s=.8 if (lidar_stale or lidar_sim_lag) else 1.0,
-                           x=29.95 if goal_reached_position else 30.201 if goal_crossed else .02,
+                           x=30.31 if goal_missed else 29.95 if goal_reached_position else 30.201 if goal_crossed else .02,
                            yaw=.05 if goal_reached_position else .30 if goal_crossed else 0.0,
                            linear_velocity=.2 if (goal_reached_position or goal_crossed) else 0.0,
                            accel_z=9.80665,
@@ -320,6 +321,8 @@ class TestEnvironmentContract(unittest.TestCase):
             publish_control=lambda *args: commands.append(args),
             publish_straight_command=lambda speed: None,
             advance_world=advance_world,
+            latest_clock_stamp=lambda: clock[0],
+            wait_for_motion_state=lambda *args, **kwargs: {"odom": .02},
             sensor_markers=lambda names: {name: 0.0 for name in names},
             sensor_stream_ready=lambda name, stale_after: not lidar_stale,
             wait_for_sensor_updates=lambda previous, timeout: None,
@@ -377,6 +380,11 @@ class TestEnvironmentContract(unittest.TestCase):
         env.min_speed_scale = 1.
         env.max_speed_scale = 0.
         env.ground_speed_sum = 0.
+        env.episode_reward_terms = {}
+        env.max_clock_error = env.max_motion_sensor_lag = 0.
+        env.episode_curriculum_stage = 5
+        env.episode_terrain_height_scale = 1.0
+        env.episode_terrain_layout = []
         env.config["evaluation_baseline"] = baseline
         if navigation_invalid:
             env.config["navigation_invalid_hold_seconds"] = .05
@@ -407,7 +415,7 @@ class TestEnvironmentContract(unittest.TestCase):
         self.assertFalse(truncated)
         self.assertAlmostEqual(
             info["reward_terms"]["terminal"],
-            -100.0 * (0.5 + 0.5 * (1.0 - 0.02 / 30.0)),
+            -100.0,
         )
         self.assertEqual(info["episode_metrics"]["termination"], "timeout")
         self.assertEqual(commands[-1], (0., 0., 0.))
@@ -472,6 +480,14 @@ class TestEnvironmentContract(unittest.TestCase):
         self.assertFalse(terminated)
         self.assertFalse(truncated)
         self.assertNotIn("episode_metrics", info)
+
+    def test_irrecoverable_forward_overshoot_ends_with_failure(self):
+        (_, reward, terminated, truncated, info), commands = self.run_step(goal_missed=True)
+        self.assertTrue(terminated)
+        self.assertFalse(truncated)
+        self.assertEqual(info['episode_metrics']['termination'], 'goal_missed')
+        self.assertEqual(info['reward_terms']['terminal'], -100.)
+        self.assertEqual(commands[-1], (0., 0., 0.))
 
 
 if __name__ == "__main__":

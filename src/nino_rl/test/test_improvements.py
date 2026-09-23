@@ -11,6 +11,7 @@ import pytest
 import yaml
 
 from nino_rl.core import RobotState, TrackingState, quaternion_to_euler
+from nino_rl.task_geometry import approach_speed
 from nino_rl.control_v2 import (
     BASELINE_ACTION, ChallengeRegion, ChallengeTracker, compute_reward,
 )
@@ -52,42 +53,46 @@ def test_every_phase_has_one_cable_and_size_angle_get_easier():
     assert diameters == sorted(diameters, reverse=True)
     assert angles == sorted(angles, reverse=True)
     assert all(diameter > 0.0 for diameter in diameters)
+    signs = []
+    for seed in range(20):
+        env.np_random = np.random.default_rng(seed)
+        signs.append(np.sign(cables(env, 0)[0][2]))
+    assert set(signs) == {-1.0, 1.0}
+    easiest_signs = []
+    for seed in range(20):
+        env.np_random = np.random.default_rng(seed)
+        easiest_signs.append(np.sign(cables(env, 5)[0][2]))
+    assert set(easiest_signs) == {-1.0, 1.0}
 
 
 def test_straight_command_cruises_slows_crawls_and_stops_at_one_cm():
-    command = method('ros_env.py', '_straight_command', dict(np=np))
-    env = SimpleNamespace(
-        config={"goal_tolerance_m": 0.01},
-        straight_speed=0.4,
-        minimum_approach_speed=0.03,
-        goal_slowdown_distance=1.0,
-    )
-    assert command(env, 2.0) == pytest.approx(0.4)
-    assert command(env, 0.51) == pytest.approx(0.2)
-    assert command(env, 0.02) == pytest.approx(0.03)
-    assert command(env, 0.01) == 0.0
+    config = deepcopy(CONFIG)
+    config['goal_tolerance_m'] = .01
+    config['navigation']['straight_speed_m_s'] = .4
+    config['navigation']['goal_slowdown_distance_m'] = 1.0
+    assert approach_speed(2., 2., 0., config) == pytest.approx(.4)
+    assert approach_speed(.51, .51, 0., config) == pytest.approx(.2)
+    assert approach_speed(.02, .02, 0., config) == pytest.approx(.03)
+    assert approach_speed(.01, .01, 0., config) == 0.
 
 
 def test_adaptive_terrain_randomizes_mixed_features_across_path():
     features = method('ros_env.py', '_adaptive_terrain_features', dict(np=np))
     env = SimpleNamespace(
         adaptive_terrain_enabled=True,
-        terrain_feature_count=20,
+        terrain_feature_count=8,
         np_random=np.random.default_rng(42),
-        config={"adaptive_terrain": {
-            "zone_x_m": [1.2, 5.2],
-            "max_center_offset_m": 0.10,
-            "max_lateral_center_m": 1.55,
-        }},
+        config=deepcopy(CONFIG),
     )
     generated = features(env)
     env.np_random = np.random.default_rng(43)
     regenerated = features(env)
-    assert len(generated) == 20
-    assert {feature[0] for feature in generated} == {"pothole", "bump", "cable"}
+    assert len(generated) == 8
+    assert {feature[0] for feature in generated} == {"pothole", "bump", "cable", "groove"}
+    half_track = CONFIG['adaptive_terrain']['wheel_separation_m'] / 2
     for kind, x, y, size in generated:
         assert 1.2 <= x <= 5.2
-        assert abs(y) <= 0.10
+        assert abs(y) <= half_track
         assert abs(y) + size < 1.80
     assert generated != regenerated
 
@@ -103,7 +108,7 @@ def test_challenge_tracker_includes_only_traversable_episode_geometry():
             "robot_contact_margin_m": 0.20,
             "robot_clearance_margin_m": 0.30,
         },
-        "adaptive_terrain": {"cable_length_m": 0.55},
+        "adaptive_terrain": {"cable_length_m": 0.55, "groove_length_m": 0.70},
     })
     tracker = build(
         env,
@@ -112,11 +117,14 @@ def test_challenge_tracker_includes_only_traversable_episode_geometry():
             ("pothole", 2.0, 0.0, 0.30),
             ("bump", 3.0, 0.0, 0.12),
             ("cable", 5.0, 0.0, 0.015),
+            ("groove", 4.5, 0.0, 0.05),
             ("obstacle", 3.5, 0.0, 0.12),
         ],
     )
-    assert tracker.total == 4
-    assert {region.kind for region in tracker.regions} == {"pothole", "bump", "cable"}
+    assert tracker.total == 5
+    assert {region.kind for region in tracker.regions} == {"pothole", "bump", "cable", "groove"}
+    groove = next(region for region in tracker.regions if region.kind == 'groove')
+    assert groove.half_length == pytest.approx(.35)
 
 
 def test_adaptive_terrain_advances_only_after_rolling_success_gate():
@@ -206,10 +214,24 @@ def test_default_field_capacity_randomization_and_spacing():
         env.np_random = np.random.default_rng(seed)
         features = generate(env)
         assert len(features) == 8
-        assert {f[0] for f in features} == {'bump', 'pothole', 'cable'}
+        assert {f[0] for f in features} == {'bump', 'pothole', 'cable', 'groove'}
         assert min(np.diff([f[1] for f in features])) >= .45
         layouts.append(tuple(features))
     assert len(set(layouts)) == 30
+
+
+def test_challenge_centers_cover_full_wheel_span_without_exceeding_it():
+    generate = method('ros_env.py', '_adaptive_terrain_features', dict(np=np))
+    env = SimpleNamespace(config=deepcopy(CONFIG), adaptive_terrain_enabled=True,
+                          terrain_feature_count=8)
+    ys = []
+    for seed in range(200):
+        env.np_random = np.random.default_rng(seed)
+        ys.extend(feature[2] for feature in generate(env))
+    half_track = CONFIG['adaptive_terrain']['wheel_separation_m'] / 2
+    assert max(abs(y) for y in ys) <= half_track
+    assert min(ys) < -.95 * half_track
+    assert max(ys) > .95 * half_track
 
 
 def test_downward_scan_produces_advance_terrain_preview():

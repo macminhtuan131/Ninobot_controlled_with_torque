@@ -16,6 +16,36 @@ CONFIG = yaml.safe_load((Path(__file__).resolve().parents[1] / "config/ppo.yaml"
 
 
 class RewardTests(unittest.TestCase):
+    def test_challenges_and_progress_cannot_outpay_failure_on_default_route(self):
+        """A full, aligned route with every bonus is the optimistic failure case."""
+        cfg = {**CONFIG["reward_v2"], "torque_scale_nm": 2.0}
+        length = float(np.linalg.norm(np.asarray(CONFIG["navigation"]["goal_pose"][:2])
+                                      - CONFIG["navigation"]["start_pose"][:2]))
+        def episode(outcome, steps=100):
+            total = 0.
+            for i in range(steps):
+                s0, s1 = length*i/steps, length*(i+1)/steps
+                terminal = i == steps-1
+                _, terms = compute_reward(
+                    TrackingState(s0, 0, 0, length-s0, length-s0),
+                    TrackingState(s1, 0, 0, length-s1, length-s1),
+                    RobotState(), BASELINE_ACTION, BASELINE_ACTION, [0, 0], .1,
+                    {"impact_integral": 0}, cfg,
+                    succeeded=terminal and outcome == "success",
+                    timed_out=terminal and outcome == "timeout",
+                    failed=outcome if terminal and outcome in ("off_path", "collision") else None,
+                    challenge_entry_count=int(i in (10, 20)),
+                    challenge_clear_count=int(i in (15, 25)),
+                    challenge_cleared_total=int(i >= 15)+int(i >= 25), challenge_total=2,
+                    completion_fraction=s1/length, elapsed=(i+1)*.1,
+                    target_finish_seconds=CONFIG["target_finish_seconds"])
+                total += sum(terms.values())
+            return total
+        for failure in ("timeout", "off_path", "collision"):
+            self.assertLess(episode(failure), 0.)
+        self.assertGreater(episode("success"), 150.)
+        self.assertGreater(episode("success", 100), episode("success", 190))
+
     def terms(self, state=None, current=None, reference=None, **kwargs):
         previous = TrackingState(0, 0, 0, 30, 30)
         cfg = {**CONFIG["reward_v2"], "torque_scale_nm": .5}
@@ -193,7 +223,7 @@ class PolicyTests(unittest.TestCase):
         # Small random head weights add a small state-dependent offset.
         np.testing.assert_allclose(action, [.4, 0., 0.], atol=.01)
         np.testing.assert_allclose(model.policy.log_std.detach().numpy(),
-                                   config["ppo"]["log_std_init"])
+                                   np.log(config["ppo"]["initial_action_std"]), atol=1e-6)
         self.assertIsNot(model.policy.pi_features_extractor, model.policy.vf_features_extractor)
         before = model.policy.action_net.weight.detach().clone()
         model.learn(64)
@@ -211,6 +241,7 @@ class PolicyTests(unittest.TestCase):
             path = Path(directory) / "policy.zip"
             model.save(path)
             restored = PPO.load(path, device="cpu")
+            th.testing.assert_close(restored.policy.log_std, model.policy.log_std)
             validate_resume(restored, config)
             self.assertEqual(
                 restored.nino_adaptive_terrain_state,

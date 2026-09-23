@@ -103,15 +103,31 @@ def main() -> None:
                     self.reward_terms.setdefault(name, []).append(float(value))
                 metrics = info.get("episode_metrics")
                 if metrics is not None:
-                    self.logger.record_mean(
-                        "episode/wrong_direction_failure",
-                        float(metrics["termination"] == "wrong_direction"),
-                    )
+                    # Preserve each outcome instead of only rollout averages;
+                    # this also survives an interrupted/incomplete PPO rollout.
+                    with (run_dir / "episodes.jsonl").open("a", encoding="utf-8") as stream:
+                        stream.write(json.dumps({"training_step": self.num_timesteps,
+                                                 **metrics}) + "\n")
+                    for reason in ("timeout", "off_path", "collision", "rollover",
+                                   "wrong_direction", "navigation_invalid", "goal_missed"):
+                        self.logger.record_mean(
+                            f"episode/{reason}_failure", float(metrics["termination"] == reason))
+                    for name, value in metrics["reward_totals"].items():
+                        self.logger.record_mean(f"episode_reward/{name}", float(value))
                     for name in (
+                        "return",
+                        "clock_elapsed_seconds",
+                        "max_clock_error_seconds",
+                        "max_motion_sensor_lag_seconds",
+                        "curriculum_phase",
+                        "terrain_height_scale",
                         "success",
                         "finished_within_target_time",
                         "time_seconds",
                         "endpoint_distance_m",
+                        "heading_error_deg",
+                        "final_abs_lateral_drift_m",
+                        "final_speed_m_s",
                         "mean_abs_lateral_error_m",
                         "rms_path_deviation_m",
                         "max_path_deviation_m",
@@ -145,6 +161,8 @@ def main() -> None:
             return True
 
         def _on_rollout_end(self) -> None:
+            for index, name in enumerate(("speed", "common_torque", "steering")):
+                self.logger.record(f"policy/std_{name}", float(self.model.policy.log_std[index].detach().exp().cpu()))
             # Do not leave the policy driving during an arbitrarily long PPO update.
             env.ros.publish_control(0.0, 0.0, 0.0)
             # The lockstep environment is already paused between every action,

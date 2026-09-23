@@ -76,7 +76,7 @@ Distances are metres; angles radians. Coefficients are initial tuning values.
 
 | Term | Definition |
 |---|---|
-| progress | +20 delta-progress, gated by straight-line position/heading alignment |
+| progress | +10 reduction in Euclidean goal distance; positive changes gated by position/heading alignment, negative changes fully penalized |
 | lateral | -0.50 h C(lateral_error / 0.25) |
 | heading | -0.25 h C(heading_error / 0.35) |
 | impact | -0.05 impact_scale integral(min((a_world_z/2)^4,81) dt) / 0.1 |
@@ -85,13 +85,13 @@ Distances are metres; angles radians. Coefficients are initial tuning values.
 | slip | -0.1 h [C(slip_left/0.30) + C(slip_right/0.30)] |
 | smoothness | -0.02 sum((action - previous_action)²) / h |
 | effort | -0.01 h mean((commanded_residual / max_residual)²) |
-| time | -0.01 h |
+| time | -0.05 h |
 | stall | -0.5 h after <5cm net progress in 3s while Nav2 requests forward motion and goal is not reached |
-| challenge entry | up to +10 total per episode, split across unique traversable hazards |
-| challenge clear | up to +30 total per episode, split across unique traversable hazards |
-| successful difficult path | up to +60 at goal, proportional to the cleared-hazard fraction |
+| challenge entry | up to +2 total per episode, split across unique traversable hazards |
+| challenge clear | up to +8 total per episode, split across unique traversable hazards |
+| successful difficult path | up to +90 at goal, proportional to the cleared-hazard fraction |
 | on-time success | up to +50, proportional to positive margin before the 15 s target |
-| terminal | +100 success; -100 collision/rollover/wrong direction; -75 off path; timeout from -50 near the goal to -100 at zero completion |
+| terminal | +100 success; -100 collision/rollover/wrong direction/timeout/goal missed; -75 off path |
 
 `impact_scale = min(1, 0.25 + (phase-1)/5)` ramps impact penalty across phases.
 Failure takes precedence over success and timeout. Goal tolerance/stopped-arrival
@@ -100,12 +100,15 @@ LiDAR proximity test; it is not a physical contact classifier. The wheel-ground
 contact of traversable bumps is not itself counted as a collision.
 
 Challenge entry and clearance are one-shot episode flags computed from the
-known training geometry and odometry only for reward/metrics; spawn coordinates
+known training geometry and powered-wheel swept odometry footprints only for reward/metrics; spawn coordinates
 are not actor observations. The maximum entry/clear return is invariant to the
 number of hazards. A failed or timed-out step cannot earn a new challenge
 bonus, while the largest challenge bonus requires successful goal arrival.
-The adaptive generator contains only a shallow stepped bump, basin surrogate,
-and transverse cable. The retained 35 cm post geometry is a blocking obstacle
+The adaptive generator restores the established full-size, near-route terrain
+distribution with up to eight hazards. Feature centers are sampled across the
+full ±half-wheel-track span. It contains a shallow stepped bump, 30 mm basin
+surrogate, transverse cable, and a two-shoulder transverse road groove. The phase cable's bounded tilt is
+mirrored randomly each episode. The retained 35 cm post geometry is a blocking obstacle
 for route-planning tests and is excluded from this wheel-control curriculum.
 
 All IMU samples in a policy window contribute using zero-order hold. Coverage
