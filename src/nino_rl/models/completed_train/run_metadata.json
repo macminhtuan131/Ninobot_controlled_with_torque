@@ -1,0 +1,26 @@
+{
+  "argv": [
+    "/home/tuanmac/ninorobot/install/nino_rl/lib/nino_rl/train",
+    "--device",
+    "cuda",
+    "--phase",
+    "1",
+    "--timesteps",
+    "200000",
+    "--checkpoint-every",
+    "25000",
+    "--config",
+    "rl_runs/20260923-221053-583085/ppo.yaml",
+    "--resume",
+    "rl_runs/20260923-221053-583085/nino_ppo_final.zip"
+  ],
+  "python": "3.12.3",
+  "device": "cuda",
+  "gpu": "NVIDIA GeForce RTX 4080",
+  "packages": {
+    "torch": "2.13.0+cu126",
+    "stable-baselines3": "2.9.0",
+    "gymnasium": "1.3.0",
+    "numpy": "1.26.4"
+  }
+}

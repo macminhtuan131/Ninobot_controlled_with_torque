@@ -19,6 +19,8 @@ setup(
         ),
         (os.path.join("share", package_name, "config"), glob("config/*.yaml")),
         (os.path.join("share", package_name, "launch"), glob("launch/*.launch.py")),
+        (os.path.join("share", package_name, "models", "completed_train"),
+         glob("models/completed_train/*")),
     ],
     install_requires=["setuptools"],
     zip_safe=True,

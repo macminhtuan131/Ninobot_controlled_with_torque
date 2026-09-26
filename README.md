@@ -37,7 +37,10 @@ hazard curriculum changed, older checkpoints cannot be resumed; start a new
 run. New checkpoints retain rolling curriculum state, so
 resume no longer resets hazard difficulty. Old models may still be used for
 inference with their matching config. Old 54-input/2-action models are
-incompatible. No pretrained weights or measured performance gains are included.
+incompatible. The `Completed_train` branch includes [trained weights and recorded training
+results](src/nino_rl/models/completed_train/README.md). The final checkpoint has
+1,001,634 cumulative steps; held-out performance gains and hardware transfer
+have not been established.
 
 ## 1. Prepare Ubuntu and the NVIDIA GPU
 

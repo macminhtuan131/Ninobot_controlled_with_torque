@@ -30,11 +30,12 @@ from nino_rl.control_v2 import (
 def arguments() -> argparse.Namespace:
     share = Path(get_package_share_directory("nino_rl"))
     parser = argparse.ArgumentParser(description="Run a trained Nino PPO torque policy")
-    parser.add_argument("--model", required=True, type=Path)
-    parser.add_argument("--config", type=Path, default=share / "config" / "ppo.yaml")
+    parser.add_argument("--model", type=Path,
+                        default=share / "models" / "completed_train" / "nino_ppo_final.zip")
+    parser.add_argument("--config", type=Path, default=share / "models" / "completed_train" / "ppo.yaml")
     parser.add_argument("--path", type=Path, default=share / "config" / "path.yaml")
     parser.add_argument("--use-sim-time", action="store_true")
-    parser.add_argument("--device", default=None, help="cuda, cpu, or auto")
+    parser.add_argument("--device", default="cpu", help="cuda, cpu, or auto (default: cpu)")
     return parser.parse_args(sys.argv[1:])
 
 

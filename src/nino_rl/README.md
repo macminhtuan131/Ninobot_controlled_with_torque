@@ -21,3 +21,9 @@ Training contract revision 24 requires a fresh run after this patch. Later phase
 changes can resume revision-24 checkpoints. The older `ALGORITHM_V2.md` and
 `REWARD_POLICY_UPDATE.md` describe historical revisions; current defaults and
 commands are in the root README and RL_IMPROVEMENTS.md.
+
+## Completed training bundle
+
+[Weights, measured training results and integration commands](models/completed_train/README.md)
+are included in this package. After rebuilding, `ros2 run nino_rl policy_node`
+loads the bundled checkpoint and matching configuration on CPU by default.

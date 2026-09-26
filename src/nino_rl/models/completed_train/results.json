@@ -1,0 +1,48 @@
+{
+  "source_run": "rl_runs/20260924-064153-058321",
+  "source_code_commit": "fdc7d80243c3d226d3ebbef7ba11ef580e1876ab",
+  "selection": "Latest completed local run; not selected by held-out evaluation.",
+  "num_timesteps": 1001634,
+  "training_contract_revision": 30,
+  "scope": "Training episodes from the final resumed segment only; stochastic collection, not held-out deterministic evaluation or hardware validation.",
+  "all_episodes": {
+    "episodes": 1571,
+    "successes": 630,
+    "success_rate": 0.4010184595798854,
+    "termination_counts": {
+      "success": 630,
+      "goal_missed": 815,
+      "off_path": 89,
+      "timeout": 31,
+      "wrong_direction": 6
+    },
+    "mean_return": 3.1518775032421047,
+    "mean_time_seconds": 12.771546786230353,
+    "mean_path_rmse_m": 0.14783388211035395,
+    "mean_path_p95_m": 0.2866990022622134,
+    "mean_endpoint_distance_m": 0.33094031283765246
+  },
+  "last_100_episodes": {
+    "episodes": 100,
+    "successes": 48,
+    "success_rate": 0.48,
+    "termination_counts": {
+      "success": 48,
+      "goal_missed": 43,
+      "off_path": 4,
+      "timeout": 5
+    },
+    "mean_return": 33.783787421804824,
+    "mean_time_seconds": 13.386000000779168,
+    "mean_path_rmse_m": 0.11925868306294973,
+    "mean_path_p95_m": 0.2275387528679294,
+    "mean_endpoint_distance_m": 0.24959833144645613
+  },
+  "sha256": {
+    "episodes.csv": "867dee66027ab9af4172cabed36f57e8e27b0287285dfc4723ae6b0b908cf8c5",
+    "monitor.csv": "c209de675b18a8e4eff3b568d2465eb0d56c6c7a9cc46fcaa92d87d8130eaa41",
+    "nino_ppo_final.zip": "81499b67242583bbd8593c9297aa1d6699e1ce3efb525ea10f1a8b67013fdda5",
+    "ppo.yaml": "93cdec236e9ca596419388473b70b2e073a29460c7ed459e9d2c4e1673551f92",
+    "run_metadata.json": "5fb426f3f2ee491e709451c22b1b09fa90faf0cb15e50f228ae7f2d79b32b7fa"
+  }
+}
