@@ -28,6 +28,7 @@ discovery, preventing another machine or simulator from injecting a conflicting
 - [Vietnamese quick guide](src/nino_rl/README_VI.md)
 - [Bài viết nghiên cứu tổng quan bằng tiếng Việt](docs/BAO_CAO_NGHIEN_CUU_RL_NINO.md)
 - [Simulation and hardware reference](docs/HARDWARE_REFERENCE.md)
+- [Raspberry Pi deployment guide](docs/RASPBERRY_PI_DEPLOYMENT.md)
 
 The current training contract is revision 30. Because its goal-distance reward,
 restored full-size terrain, per-action exploration, physics-completion timing,

@@ -25,6 +25,11 @@ over the PI baseline have not been measured.
 
 ## Use in the project
 
+For a Raspberry Pi and physical robot, follow the
+[step-by-step deployment guide](../../../../docs/RASPBERRY_PI_DEPLOYMENT.md).
+It covers installation, the required motor hardware interface and sensor
+topics, verification, and how to start the policy on the Pi.
+
 Follow the root README for the ROS/venv dependencies and colcon build, then
 source `install/setup.bash`. The existing policy node now defaults to these
 installed weights, their matching configuration and CPU inference:
